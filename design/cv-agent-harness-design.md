@@ -1,17 +1,22 @@
 # Agentic CV Pipeline Harness — Design
 
-**Status:** design sketch, pre-implementation
-**Purpose of this document:** enough shared context for an implementing agent (Claude Code) to take a first pass and surface the problems that only appear in code.
+**Revision:** v0.3 — implementation notes merged into the body; §§1–16 now editable in place
+**Status:** interfaces being frozen; no runtime code yet
+**Purpose:** the working design of record. §§1–15 are the design. §§16–18 are the v0 build plan. §19 records what was decided, superseded, and left open.
+
+> **Process change from v0.2:** the "append to Implementation notes, never edit §§1–16" rule existed so reversals stayed legible. It worked, and it is now retired — it was the source of the §5/§15 catalog contradiction. Reversals live in §19 Superseded. Edit the body directly from here on.
 
 ---
 
-## 1. Goal
+## 1. Goal and delivery boundary
 
 Take (a) a set of images or video(s) and (b) a natural-language specification of what to detect/track, and automatically assemble, configure, and verify a working vision pipeline from a catalog of pre-built components.
 
-**Target user:** a team that needs a deployed vision pipeline and cannot get CV engineering headcount. Not a CV engineer who wants a faster loop. This drives most of the requirements below — in particular the feasibility verdict (§8), the drift monitoring (§11), and the exportable handoff (§11).
+**Target user:** a team that needs a deployed vision pipeline and cannot get CV engineering headcount. Not a CV engineer who wants a faster loop. This drives the feasibility verdict (§8), the drift monitoring (§11), and the exportable handoff (§11).
 
-**Explicit non-goal:** impressing CV practitioners with catalog breadth. Coverage of SOTA methods is worth less to this user than a pipeline that still works in November.
+**Delivery boundary — state this in launch positioning, do not let it stay implicit.** v0 accepts a ground-truth file in a standard format (COCO for detection, MOT for tracking) as its tier-3 anchor. COCO and MOT are CV surface. v0 is therefore deliverable to a friendly pilot who can produce such a file; it is **not** deliverable to the target user above until M4.5 and M5 ship (§17). Showing v0 to the stated target user is showing a developer tool to someone who cannot use it.
+
+**Explicit non-goal:** catalog breadth for its own sake. Coverage of SOTA methods is worth less to this user than a pipeline that still works in November.
 
 ---
 
@@ -22,8 +27,9 @@ Take (a) a set of images or video(s) and (b) a natural-language specification of
 | Frozen, versioned component catalog; agent composes and configures, never authors | Generated code has no provenance, can't be regression-tested, and destroys the audit story for accreditation review. Also makes weak on-prem models tolerable. |
 | LLM proposes, deterministic code disposes | LLM never in the inner scoring loop. It navigates coarse search space and diagnoses failure modes; parameter sweeps are a `for` loop. Violating this breaks cost, latency, and reproducibility at once. |
 | Measurable properties belong to the profiler, not the agent | Scene characteristics are cheap deterministic measurements. The LLM classifies over a handful of regimes rather than reasoning open-endedly about the data. |
-| Append-only decision ledger is the primary artifact | It is the leave-behind for humans, the input to future agents, and the case base that makes the system improve without the model improving. |
-| Human adjudication at one specific point, on domain questions only | Half a day of "is this the thing, yes/no" converts label-free search into supervised AutoML. Requires domain knowledge, not CV knowledge. |
+| Append-only decision ledger is the primary artifact | The leave-behind for humans, the input to future agents, and the case base that makes the system improve without the model improving. |
+| Human adjudication at one specific point, on domain questions only | Converts label-free search into supervised AutoML. Requires domain knowledge, not CV knowledge. |
+| Local model is the ship gate; hosted model is the diagnostic reference | Running only local makes under-specified scaffolding indistinguishable from a weak model, and those have opposite fixes (§18). |
 
 ---
 
@@ -31,14 +37,14 @@ Take (a) a set of images or video(s) and (b) a natural-language specification of
 
 | Layer | Responsibility | LLM involvement |
 |---|---|---|
-| Spec compiler | NL spec → typed task contract: ontology, spatial/temporal predicates, operating point (recall- vs precision-weighted), hardware envelope, success criteria | High. One-shot, human-confirmed. |
-| Data profiler | Cheap deterministic probes → regime vector (§4) | None |
-| Feasibility gate | Regime vector + contract → proceed / refuse with physical reason (§8) | Low. Rule-driven. |
-| Capability registry | Typed components with declared preconditions, I/O contracts, cost, license, version | None |
-| Planner | Regime + contract → 3–6 candidate topologies; retrieves seed configs from case base | Medium. Constrained generation over registry only. |
-| Stage specialists | Per-stage optimization: detection, association, ReID/appearance, event logic | Existing VLM tuner drops in here as the detection/association specialist |
+| Spec compiler | NL spec → typed task contract: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria | High. One-shot, human-confirmed. |
+| Data profiler | Cheap deterministic probes → regime vector with per-probe confidence (§4, §4.1) | None |
+| Feasibility gate | Regime vector + contract → proceed / refuse with physical reason (§8); refuses on low-confidence profiling | Low. Rule-driven. |
+| Capability registry | Typed components: preconditions, I/O contracts, two-tier cost function (§13), license, pinned version | None |
+| Planner | Regime + contract → candidate topologies via compositional rules (§4.2); seeds from case base when available | Medium. Constrained generation over registry only. |
+| Stage specialists | Per-stage optimization: detection, association, ReID/appearance, event logic | Existing VLM tuner drops in as the detection/association specialist |
 | Scorer | Tiered scoring stack (§6) | VLM only at tier 2 |
-| Packager | Config freeze, container build, ledger export, replay bundle | None |
+| Packager | Cost calibration, config freeze, container build, ledger export, replay bundle | None |
 | Monitor | Drift detection against frozen eval set, re-tune trigger, regression gate | None |
 
 The task contract is the human-confirmed interface. Everything downstream compiles against it. Without it this is a demo rather than a system.
@@ -49,36 +55,65 @@ The task contract is the human-confirmed interface. Everything downstream compil
 
 Every axis of the exploration space that can be measured, is measured. Deterministic code, no model involvement.
 
-| Axis | Measurement | Constrains |
-|---|---|---|
-| Pixels on target | Proposal box height distribution, p10/p50 | Input scale, tiling strategy, detector family |
-| Congestion | Detections per frame, mean pairwise IoU, occlusion rate | Tracker family, association gating |
-| Motion dynamics | Optical-flow magnitude, per-track displacement variance, camera-motion estimate | Buffer length, Kalman assumptions, camera-motion compensation |
-| Lighting | Frame-level intensity variance over time, saturation/clipping fraction | Augmentation; whether appearance ReID is viable at all |
-| Appearance separability | Inter-instance embedding distance on sampled crops | ReID on/off, appearance weight in association |
-| Target novelty | Open-vocab score distribution against the spec ontology | Off-the-shelf vs. few-shot vs. fine-tune |
+| Axis | Measurement | Proposal-dependent? | Constrains |
+|---|---|---|---|
+| Pixels on target | Proposal box height distribution, p10/p50 | Yes | Detector, tile strategy |
+| Congestion | Detections per frame, mean pairwise IoU, occlusion rate | Yes | Tracker, association gating |
+| Motion dynamics | Optical-flow magnitude, per-track displacement variance, camera-motion estimate | No | Tracker, buffer length, Kalman assumptions, camera-motion compensation |
+| Lighting | Frame-level intensity variance over time, saturation/clipping fraction | No | Augmentation; whether appearance ReID is viable at all |
+| Appearance separability | Inter-instance embedding distance on sampled crops | Yes | ReID on/off, appearance weight in association |
+| Target novelty | Open-vocab score distribution against the spec ontology | Yes | Detector |
 
-**Honest note for implementers:** the regime → topology mapping is hand-authored expertise at the start. It is a lookup table with a language model on the front, not emergent reasoning. That's fine — it's the moat — but it should never be described internally as anything else.
+### 4.1 Probe confidence and the bootstrap problem
 
-> **Amendment (see Implementation notes → resolved decisions):** the "lookup table" is now structured as per-axis rules composed by intersection plus an evidence-backed override table for known joint interactions. Growth costs one rule, not O(topologies × regimes) cells. The character of the moat is unchanged; the storage shape is.
+Four of six probes are measured **from proposals**, which means they depend on a detector that may itself be failing. If the open-vocab detector lands in the failed half of its bimodal regime (§14), the regime vector is garbage and every downstream decision is confidently wrong on bad input.
+
+- Probes are detector-independent wherever possible. Optical flow, intensity variance, and saturation/clipping need no proposals.
+- Where a probe is unavoidably proposal-dependent, it **emits a confidence alongside the value**, not a bare scalar.
+- The feasibility gate **refuses on low profiling confidence** rather than proceeding. For a team with no CV engineer, no verdict beats a confident-wrong verdict.
+- **Probe-discrimination validation** (M2): each probe must demonstrate on a held-out regime set that it separates the regimes it claims to. Failure to discriminate blocks that probe from shipping. A probe returning a plausible number on every scene is worse than a missing probe.
+
+### 4.2 Regime → topology mapping: compositional rules, not a cell table
+
+Regime axes constrain **different** catalog dimensions, so the mapping is authored as per-axis rules composed by intersection rather than enumerated over the cross-product:
+
+| Regime axis | Constrains |
+|---|---|
+| Pixels on target | {detector, tile} |
+| Target novelty | {detector} |
+| Congestion | {tracker} |
+| Motion dynamics | {tracker} |
+| Appearance separability | {reid} |
+
+6–8 rules, O(regimes + topologies). Growing either axis costs one rule, not fifty cells.
+
+Composition misses genuine joint interactions — congestion may argue for appearance-assisted tracking while motion dynamics argues for motion-only. A short **override table** for known joint cases sits on top of the compositional defaults.
+
+**Override promotion criterion.** An override is promoted only when **two single-variable deltas along the axes in question each fail — refuted or inconclusive — to explain the observed improvement**. That isolates the interaction. Joint-refinement-pass `confirmed` verdicts are explicitly *not* sufficient: §9 marks those entries `confounded` precisely because they cannot be attributed to any single axis pair. Anything weaker than the two-delta test is a candidate for further probing, not a decision. Overrides added on correlation become permanent noise in a hand-authored rule set.
+
+**Honest note for implementers:** these rules are hand-authored expertise at the start, not emergent reasoning. That is fine — it is the moat — but it should never be described internally as anything else.
 
 ---
 
 ## 5. Search space collapse
 
-| Stage | Approximate size | Mechanism |
-|---|---|---|
-| Raw catalog | ~8 detectors × 4 scale/tile strategies × 5 trackers × 4 ReID options ≈ 640 topologies | — |
-| × parameters | ~8 tunable params × 5 values ≈ 3.9×10⁵ per topology → ~2.5×10⁸ | — |
-| Tier-0 constraints | ~150 topologies | Latency, VRAM, airgap, license |
-| Regime conditioning | 6–10 topologies | §4 mapping |
-| Case-base retrieval | 6–10 seeded configs | Nearest prior solution supplies starting params |
-| Staged local search | ~25–40 evals per topology | ±2 steps per param, coordinate descent, not grid |
-| **Total** | **~200–400 pipeline evaluations** | Hours on a short clip |
+Worked for the v0 catalog (§15). The general argument holds at any catalog size; the numbers move.
+
+| Stage | v0 | Full-catalog aspiration | Mechanism |
+|---|---|---|---|
+| Raw catalog | 3 detectors × 2 tile × 2 trackers × 2 ReID = 24 topologies | ~640 topologies | — |
+| × parameters | ~8 params × 5 values ≈ 3.9×10⁵ per topology → ~9.4×10⁶ | ~2.5×10⁸ | — |
+| Tier-0 constraints | ~14 topologies | ~150 | Latency, VRAM, airgap, license — against the reference cost function with declared hardware scaling (§13) |
+| Regime conditioning | 3–5 topologies | 6–10 | §4.2 compositional rules |
+| Case-base retrieval | no-op in v0 | 6–10 seeded configs | Post-v0. Registry defaults supply seeds until then |
+| Staged local search | ~25–40 evals per topology | ~25–40 | ±2 steps per param, coordinate descent, not grid |
+| **Total** | **~100–200 evaluations** | **~200–400 evaluations** | Hours on a short clip |
+
+Regime conditioning is the dominant reduction and it is bounded by profiler discriminative power, not catalog size. That is why catalog breadth is gated by the profiler and not the reverse.
 
 **Stage ordering:** detection quality → association → appearance/ReID → event logic. Detection dominates every downstream metric; tuning association against a bad detector wastes budget.
 
-This greedy staging is provably suboptimal — detector operating point and association thresholds interact. Budget one joint refinement pass over a narrow neighborhood at the end. Expect a few points, not a transformation. Mark all entries from that pass as confounded (§9).
+Greedy staging is provably suboptimal — detector operating point and association thresholds interact. Budget one joint refinement pass over a narrow neighborhood at the end. Expect a few points, not a transformation. Mark all entries from that pass `confounded` (§9).
 
 ---
 
@@ -86,52 +121,94 @@ This greedy staging is provably suboptimal — detector operating point and asso
 
 **The central technical risk.** Label-free proxy metrics (`short_track_ratio`, `conf_p50_margin`, `near_threshold_fraction`, track-count stability) rank configurations *within* an equivalence class — same detector family, same class vocabulary. They do **not** rank *across* classes.
 
-Concretely: a fragmented-track signature from an open-vocab detector that half-recognizes the target is indistinguishable from the signature of a strong detector at too high a threshold. The correct response is opposite in each case (swap the detector vs. lower the threshold). Treating proxies as globally comparable will confidently select the wrong architecture.
+A fragmented-track signature from an open-vocab detector that half-recognizes the target is indistinguishable from the signature of a strong detector at too high a threshold. The correct response is opposite in each case. Treating proxies as globally comparable will confidently select the wrong architecture.
 
-| Tier | Mechanism | Valid for | Cost |
+| Tier | Mechanism | Valid for | v0 |
 |---|---|---|---|
-| 0 | Hard constraints: latency, VRAM, license, airgap, vocabulary coverage | Filtering, never scoring | Free |
-| 1 | Label-free proxies | Parameters within one topology + vocabulary | Cheap, automatic |
-| 2 | VLM pairwise preference over sampled crops, ranked via Bradley-Terry | Coarse cross-config ordering | Moderate, noisy |
-| 3 | Human-adjudicated micro-eval set | Final cross-config selection, regression gating | One-time human cost |
+| 0 | Hard constraints: latency, VRAM, license, airgap, vocabulary coverage | Filtering, never scoring | Yes |
+| 1 | Label-free proxies | Parameters within one topology + vocabulary | Yes |
+| 2 | VLM pairwise preference, ranked via Bradley-Terry | Coarse cross-config ordering | No — post-v0 |
+| 3 | Ground-truth eval set + scoring function | Cross-config selection, regression gating | Yes, minimal form (§7) |
+
+**All cross-topology selection routes through tier 3 exclusively.** Tier-1 scores are scoped in the type system to intra-topology, intra-vocabulary comparison and are not orderable across topologies at the API level. A multi-topology planner scored by tier 1 is the exact bug this section exists to prevent; where tier 3 is unavailable for a run, the planner is restricted to a single topology.
 
 Tier 2 uses pairwise comparison deliberately: VLM judges are considerably more reliable at "which of these two is better" than at absolute quality scores. Use it to prune, not to decide.
 
-Every ledger entry records which tier produced its score, so trust is inspectable.
+Every ledger entry records which tier produced its score.
 
 ---
 
-## 7. The anchor: human adjudication budget
+## 7. The eval anchor
 
 The first thing auto-annotation buys is a **held-out evaluation set**, not training data. With a trustworthy eval slice the problem collapses from label-free search (hard) to supervised AutoML (well understood). A hundred well-chosen labeled frames beats ten thousand noisy pseudo-labels.
 
+| | v0 (minimal tier 3) | Target-user form (M4.5 + M5) |
+|---|---|---|
+| Input | COCO / MOT file, produced however the pilot likes | Review over auto-generated proposals |
+| Tooling | Scoring function only | Proposal pipeline + review UI |
+| Audience | Friendly pilot with CV surface tolerance | §1 target user |
+
+### 7.1 Two sets, not one
+
+Sampling on **config disagreement** and sampling for an **unbiased per-regime estimate** are different jobs, and merging them breaks the budget (§7.2). Split them:
+
+| Set | Sampled on | Used for | Never used for |
+|---|---|---|---|
+| Eval set | Regime strata only (~6) | Tier-3 scores, cross-config selection, regression gating, drift baseline | — |
+| Diagnostic set | Candidate-config disagreement | Tier-2 pruning, human spot-checks, failure-mode diagnosis | Any scored number |
+
+The diagnostic set is where configs actually differ, which makes it maximally informative and maximally biased. Keeping it out of the headline number is what lets it be sampled aggressively.
+
+### 7.2 Budget derivation
+
+Uniform sampling returns the modal easy case; the eval set then fails to cover regimes where candidates differ, and tier 3 produces false confidence with a credible-looking number. Worse than no tier 3. But stratification has an arithmetic cost that the original half-day budget did not survive:
+
+| Quantity | Merged-set design | Split-set design (§7.1) |
+|---|---|---|
+| Strata | 6 regimes × 4 disagreement bands = 24 | 6 regimes |
+| Boxes per stratum at ~1,500 total | ~62 | ~250 |
+| CI half-width at p≈0.9 | ±7.5 pts | ±3.7 pts |
+| Boxes needed to resolve a 3-pt difference | ~385/stratum → ~9,200 total | ~385/stratum → ~2,300 total |
+| Adjudication time | ~9–15 h | ~2.5–4 h |
+
+So: per-stratum CIs at a merged 24-stratum design are an **exclusion** instrument only, useless for ranking close configs. The split design keeps stratum-level rigor within a plausible budget. Revised target-user budget:
+
 | Artifact | Volume | Human action | Est. time |
 |---|---|---|---|
-| Detection micro-eval | ~200 diversity/uncertainty-sampled frames, ~1,500 boxes | Accept / reject / nudge open-vocab + SAM2 proposals | 1.5–2.5 h |
-| Tracking micro-eval | 3 clips × ~300 frames | Review track-level events only (births, deaths, switches), not per-frame | ~1 h |
+| Detection eval set | ~6 regime strata, ~2,300 boxes | Accept / reject / nudge proposals | 2.5–4 h |
+| Tracking eval set | 3 clips × ~300 frames | Review track-level events only (births, deaths, switches) | ~1 h |
+| Diagnostic set | ~300 boxes on disagreement | Same action, separate store | ~30 min |
 | Spec confirmation | 1 pass | Confirm compiled task contract | 10 min |
 
-**UI requirement:** the adjudication interface must expose zero CV surface — no mAP, no thresholds, no configs. "Is this the thing, yes or no." A domain expert can do this; that's why it doesn't require the headcount the team can't get.
+Roughly half a day still, but say four to six hours rather than "four hours of clicking yes," and stop describing the eval set as ~200 frames.
 
-Position honestly to users: zero to deployed pipeline in a day, four hours of which is clicking yes on boxes.
+**Tier-3 API returns per-stratum confidence intervals, never a scalar pooled over strata.** A pooled scalar reintroduces the false-confidence trap that stratification exists to eliminate. Where a pooled number is genuinely wanted (a headline figure for a report), it carries the per-stratum spread alongside it.
+
+**Sampler degradation under budget pressure:** oversample regimes with low profiling confidence (§4.1); never silently drop a stratum — an empty stratum is reported as no-estimate, not as a missing row.
+
+**UI requirement (M5):** the adjudication interface exposes zero CV surface — no mAP, no thresholds, no configs. "Is this the thing, yes or no." A domain expert can do this; that is why it does not require the headcount the team cannot get.
 
 ---
 
 ## 8. Feasibility verdict — say no early
 
-An expert's highest-leverage output is frequently a refusal. The profiler must be able to return, *before* the search runs:
+An expert's highest-leverage output is frequently a refusal. The gate must be able to return, *before* the search runs:
 
 > Target averages 11 px tall. No catalog method achieves useful recall below ~20 px. Change the lens or accept the number.
 
-A team without a CV engineer cannot distinguish "the system worked hard and 45% recall is the ceiling for this data" from "the system is broken." Without an early feasibility verdict with a specific physical reason, they get a mediocre pipeline they can't interpret and conclude the product doesn't work.
+A team without a CV engineer cannot distinguish "the system worked hard and 45% recall is the ceiling for this data" from "the system is broken." Without an early verdict carrying a specific physical reason, they get a mediocre pipeline they cannot interpret and conclude the product does not work.
 
-Related: report a **performance envelope**, not a point estimate. Where the pipeline is reliable, where it degrades, what it will miss.
+**Thresholds are catalog-derived and version-pinned.** "Useful recall below ~20 px" is a claim about the catalog. Derive from catalog benchmark data, pin to the catalog version that produced it (§13), re-derive on catalog change. A hardcoded threshold goes silently wrong the first time a component is added or retired.
+
+Starting rule set: pixels-on-target floor, congestion ceiling, appearance-separability minimum for ReID, low-profiling-confidence refusal (§4.1).
+
+Report a **performance envelope**, not a point estimate: where the pipeline is reliable, where it degrades, what it will miss.
 
 ---
 
 ## 9. The decision ledger
 
-Append-only. The winning config is a pointer into the ledger, not the artifact itself. Negative results survive — the eight branches that failed and why *are* the search pruning, and are worth more to the next agent than the final config.
+Append-only. The winning config is a pointer into the ledger, not the artifact itself. Negative results survive — the branches that failed and why *are* the search pruning, and are worth more to the next agent than the final config.
 
 | Field | Purpose |
 |---|---|
@@ -140,30 +217,44 @@ Append-only. The winning config is a pointer into the ledger, not the artifact i
 | `hypothesis` | Predicted effect, stated numerically **before** the run |
 | `outcome` | Measured effect |
 | `verdict` | confirmed / refuted / inconclusive — computed, not narrated |
-| `regime_vector` | Profiler output at the time |
+| `regime_vector` | Profiler output at the time, with per-probe confidence (§4.1) |
 | `scorer_tier` | Which tier produced the score |
 | `confounded` | True for joint-refinement entries and any multi-variable change |
+| `cost_estimated` | Planner's reference-cost estimate at decision time (§13) |
+| `cost_measured` | Target-measured cost where available |
 | `provenance` | Model, model version, seed, catalog version |
 
-`hypothesis` + `verdict` is what makes the ledger worth keeping. It lets a later run ask "in this regime, did raising the spawn threshold historically help?" and answer from evidence rather than from a prior baked into a prompt. It also yields a measurable quality signal on the local endpoint: a high refutation rate means the model is reasoning badly.
+`hypothesis` + `verdict` is what makes the ledger worth keeping. A later run can ask "in this regime, did raising the spawn threshold historically help?" and answer from evidence rather than a prior baked into a prompt. It also yields a measurable quality signal on the local endpoint: a high refutation rate means the model is reasoning badly.
+
+`cost_estimated` vs `cost_measured` divergence is its own signal: sustained drift means the reference SKU no longer represents the fleet.
 
 **Confirmed ≠ caused.** A proxy improving after a change is not attribution. Prefer single-variable deltas during staged search; flag everything else `confounded` so retrieval can downweight it.
 
-**Two renderings, one store.** Future agents need the full typed record. A human returning in month seven needs a short causal narrative: what the data looked like, why this detector, known weak spots. Generate the narrative *at decision time* — don't depend on whatever model is available later.
+**Two renderings, one store.** Future agents need the full typed record. A human returning in month seven needs a short causal narrative: what the data looked like, why this detector, known weak spots. Generate the narrative *at decision time* — do not depend on whatever model is available later.
+
+### 9.1 Storage
+
+Files-in-git is the system of record: one append-only file per entry, catalog version pinned in the entry (§13). Free provenance for regulated review (§11), works airgapped.
+
+A **derived index** (SQLite or parquet) over regime vectors supports case-base nearest-neighbour retrieval. Explicitly a cache, never authoritative, rebuildable from git by one command. Git is not an index; retrieval degrades badly past ~10 cases at 100–200 entries each.
+
+Rebuild cost is real and small: ~400 entries/problem at ~2 KB is roughly 40K files and under 100 MB at 100 problems, so a full rebuild is seconds to low minutes. Steady state uses **incremental ingest keyed on last-seen commit SHA**, O(new entries). Full rebuild remains the migration path for §13.
+
+PR diff-review of ledger files is **not** an audit surface — nobody reviews 400 JSON files. The audit surface is the narrative plus the final config, with entries pulled on demand as backing evidence.
 
 ---
 
 ## 10. Case base
 
-Every solved problem writes `(regime_vector, winning_config, achieved_score, spec_class)` to a store. New problems retrieve nearest neighbours and seed from them.
+Every solved problem writes `(regime_vector, winning_config, achieved_score, spec_class)` to the store. New problems retrieve nearest neighbours and seed from them.
 
-Retrieval requires almost no model capability, so **the system improves over time without the on-prem model improving**. This decoupling is the strongest argument for the frozen-catalog architecture. Build for it from day one, before there are cases to retrieve.
+Retrieval requires almost no model capability, so **the system improves over time without the on-prem model improving**. This decoupling is the strongest argument for the frozen-catalog architecture. Schema and storage are built in v0 (§9.1); retrieval logic is post-v0.
 
 ---
 
 ## 11. Operations
 
-**Drift.** Replacing a person means inheriting the job they'd have done later: camera bumped, seasons change, new site with different lighting. Nobody on this team will notice degradation. Drift detection against the frozen eval set, automatic re-tune, regression gate. Core to the value proposition, not phase two.
+**Drift.** Replacing a person means inheriting the job they would have done later: camera bumped, seasons change, new site with different lighting. Nobody on this team will notice degradation. Drift detection against the frozen eval set, automatic re-tune, regression gate. Core to the value proposition, though not in v0 (§17).
 
 **Handoff.** When the system fails, the team's only move is to hire a contractor for a week. Export a real repo: configs, eval set, ledger, replay bundle. An opaque service makes the first serious failure terminal for the account.
 
@@ -180,21 +271,31 @@ With a frozen catalog, all of this must be expressible declaratively. Required:
 - A typed pipeline graph spec
 - A small predicate language for event logic
 
-This is a substantial design commitment and the piece most likely to be underestimated. Skip it and the agent routinely reaches a pipeline that is 90% right and needs three lines of code it isn't allowed to write.
+The most underestimated piece in the design. Skip it and the agent routinely reaches a pipeline that is 90% right and needs three lines of code it is not allowed to write.
 
-**Controlled escape hatch (optional, one slot only):** generated code permitted in exactly one place with a fixed signature — a pure function from a track record to a boolean. Sandboxed, no imports, unit-tested against the eval set, auto-rejected on exception or regression. Weak models write a ten-line predicate reliably; they can't maintain a codebase. That distinction is what the architecture encodes.
+**Controlled escape hatch (optional, one slot only):** generated code permitted in exactly one place with a fixed signature — a pure function from a track record to a boolean. Sandboxed, no imports, unit-tested against the eval set, auto-rejected on exception or regression. Weak models write a ten-line predicate reliably; they cannot maintain a codebase. That distinction is what the architecture encodes.
 
 ---
 
-## 13. Versioning
+## 13. Versioning and the cost model
 
 The ledger references catalog components and their parameters. Retire a detector or rename a parameter and every historical entry silently degrades into noise that still reads as authoritative.
 
 - Version the catalog
 - Pin ledger entries to catalog versions
+- Pin feasibility thresholds (§8) to the catalog version that produced them
 - Write migrations on deprecation
 
-Boring, and it determines whether the case base is an asset in two years or stale JSON nobody trusts.
+### 13.1 Cost is a two-tier function of config
+
+Cost is never a scalar manifest field. Tiling cost scales with tile count — 2×2 with overlap is roughly 4–5× a single-pass detector — so a flat field teaches the case base that tiling is free, and the wrong lesson becomes durable.
+
+| Tier | Measured | Used by |
+|---|---|---|
+| Reference cost | On a canonical reference SKU at registry-register time, as a function of config parameters (tile count, input resolution, batch size, tracker window). Cached with catalog version | Planner during search, with a declared hardware scaling function |
+| Target cost | Re-measured on the hardware named in the `TaskContract` envelope, during a mandatory calibration pass before config freeze | **Tier-0 gate. Never reference-scaled cost** |
+
+The planner needs an estimate before target hardware is in the loop, which is why reference cost exists; the tier-0 gate must not ship a latency claim derived from a scaling function, which is why target cost exists. The ledger records both (§9), and sustained divergence flags reference-SKU drift.
 
 ---
 
@@ -202,152 +303,120 @@ Boring, and it determines whether the case base is an asset in two years or stal
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Proxy metrics treated as cross-config comparable | Critical | Tiered scorer (§6), tier recorded per entry |
-| "Arbitrary CV problem" scope creep | High | Pick two verticals. Surveillance/security/inspection first — roughly rigid targets, mostly static cameras |
-| Open-vocab performance is bimodal, not continuous | High | Early regime-detection check that escalates to few-shot/fine-tune instead of grinding thresholds in the useless regime |
-| Agent proliferation | Medium | One orchestrator + 5–6 tools with strict schemas. Multi-agent only where subproblems need isolated context |
-| On-prem model degradation | Medium | Differentiation lives in deterministic scaffolding. Tight, heavily validated structured-output contracts. A weaker model must produce a worse pipeline, not a broken run |
-| Glue expressiveness underestimated | Medium | §12 — design the predicate language early |
+| Proxy metrics treated as cross-config comparable | Critical | Tiered scorer (§6); tier-1 not orderable across topologies at the API level; planner restricted to one topology absent tier 3 |
+| Eval-set sampling produces false confidence | Critical | §7.1 split sets; regime strata only for scored numbers; per-stratum CIs, never a pooled scalar |
+| Profiler bootstrap: probes measured from failing proposals | High | §4.1 — per-probe confidence, feasibility refuses on low confidence, probe-discrimination validation in M2 |
+| "Arbitrary CV problem" scope creep | High | Two verticals. Surveillance/security/inspection first — roughly rigid targets, mostly static cameras |
+| Open-vocab performance is bimodal, not continuous | High | Early regime check that escalates to few-shot/fine-tune instead of grinding thresholds in the useless regime |
+| Cost modelled as a scalar, or tier-0 gating on scaled cost | High | §13.1 two-tier model; tier-0 gates on target-measured cost only |
+| Compositional mapping misses joint interactions | Medium | §4.2 override table, promoted only on the two-failed-single-variable-delta criterion |
+| Agent proliferation | Medium | One orchestrator + 5–6 tools with strict schemas |
+| On-prem model degradation | Medium | §18 — contracts authored and validated against local; local is the ship gate |
+| Glue expressiveness underestimated | Medium | §12 — predicate language in M4, not deferred |
 | Greedy staging misses interactions | Low | Bounded joint refinement pass, marked confounded |
 
 ---
 
-## 15. v0 scope
+## 15. v0 catalog
 
-Narrow aggressively:
+Four axes, 24 topologies. Chosen to span the regime axes rather than to be individually best.
 
-- Fixed topology family: detector → tracker → optional ReID
-- Person and vehicle, plus open-vocab targets
-- Surveillance video only
-- Build for real: spec compiler, capability registry, tiered scorer, ledger schema
-- Drop the existing VLM tuner in as the detection/association specialist
+| Axis | v0 values | Regime axis covered |
+|---|---|---|
+| Detector | general closed-set, open-vocab, small-object architecture | Target novelty; pixels on target |
+| Tile strategy | off, on | Pixels on target |
+| Tracker | motion-only, appearance-assisted | Congestion, motion dynamics |
+| ReID | off, on | Appearance separability |
 
-That yields an end-to-end spine in weeks. The scoring stack is the piece that gets iterated on for a year.
+**Deliberate overlap.** Tiling a general detector and using a small-object architecture attack pixels-on-target by different means. Both stay in. That axis has the least predictable answer in advance, and learning which wins per regime is what the case base is for. Revisit after ~10 solved cases with evidence, not before. This only works if §13.1's cost model is honest — the two have materially different latency and VRAM.
 
----
-
-## 16. Research angle
-
-No benchmark exists of `(spec, data, expected pipeline)` triplets. Defining one is a real contribution independent of the system itself.
+Also in v0 scope: person and vehicle plus open-vocab targets; surveillance video only; existing VLM tuner as the detection/association specialist.
 
 ---
 
-## Implementation notes
+## 16. Frozen interfaces
 
-Living section. Appended to as implementation proceeds. Notes are proposals until the design agents/human confirm.
+Freeze before writing runtime code:
 
-### Milestone plan (v0 spine, per §15)
+| # | Interface | Why it cannot be retrofitted |
+|---|---|---|
+| 1 | `TaskContract` | Everything compiles against it |
+| 2 | `LedgerEntry` | Schema drift silently corrupts the case base (§13) |
+| 3 | Registry component manifest, including the two-tier cost function signature (§13.1) | Scalar cost is the schema change that most quietly ruins tier-0 and the case base |
+| 4 | `EvalSet` — GT file reference + scorer id + catalog pin + stratum labels | Cross-topology selection depends on it; retrofitting means re-running search |
+| 5 | `MappingRules` — per-axis rules + override table (§4.2) | Adding a topology or regime is a one-rule change against this schema, not a grid rewrite |
+| 6 | `RegimeVector` — §4 axes with per-axis confidence (§4.1) | Confidence added later means every historical entry is unlabelled |
 
-**M1 — Contracts & registry (schemas only, no runtime)**
-- `TaskContract` schema: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria.
-- `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, license, pinned catalog version (§13). **Cost is a function of config, not a scalar field**, and is two-tiered for v0:
-  - **Reference cost:** measured on a canonical reference SKU at registry-register time, expressed as a function of config parameters (tile-count, input resolution, batch size, tracker window). Not declared, not guessed. Cached with catalog version.
-  - **Target cost:** re-measured on the target hardware from the `TaskContract` hardware envelope during a mandatory calibration pass before config-freeze. Tier-0 gate uses **target-measured** cost, never reference-scaled cost.
-  - **Planner during search uses reference cost with a declared hardware scaling function** — otherwise §5's staged local search can't reason about latency slack until deployment.
-  - Ledger entry records both the planner-used estimate and the measured value; sustained divergence is a data signal that the reference SKU has drifted from the fleet.
-  - Scalar cost or unmeasured tiling cost lets the case base learn that tiling is free — the exact failure mode this two-tier model prevents.
-- `LedgerEntry` schema exactly as §9 — `hypothesis`, `verdict`, `scorer_tier`, `confounded`, `provenance` are non-negotiable.
-- `RegimeVector` schema for §4 axes, extended with a per-axis confidence field (see §4.1 proposal below).
-- `EvalSet` schema: reference to a ground-truth file (COCO for detection, MOT for tracking) plus scoring-function identifier and catalog-version pin.
-- `MappingRules` schema (see resolved decision below): per-axis rules + override table for known joint interactions.
-- Output: language-agnostic JSON Schemas + generated typed bindings (Pydantic). Everything downstream compiles against these.
+---
 
-**M2 — Profiler + feasibility gate (deterministic, no LLM)**
-- Each §4 axis implemented as an independent probe returning a scalar or distribution, plus a **confidence** value where the probe cannot be made detector-independent (§4.1).
-- Feasibility gate is a rule table over regime vector → verdict with a physical-reason string (§8). **Rule thresholds are catalog-derived and pinned to the catalog version that produced them (§13), not hardcoded** — a hardcoded threshold silently goes wrong the first time the catalog changes.
-- Starting rule set: pixels-on-target floor, congestion ceiling, appearance-separability minimum for ReID, and a **low-profiling-confidence refusal** (§4.1) — no verdict is preferable to a confident-wrong verdict on bad input.
-- **Probe-discrimination validation:** each probe must demonstrate that it separates a held-out regime set before entering the vector. No unvalidated probe ships. Right now nothing in the design checks that probes actually discriminate; this closes that gap.
-- Deliverable: `profile(video) → RegimeVector`; `feasibility(contract, regime) → Verdict`.
+## 17. Milestones
 
-**M3 — Planner + ledger + tiered scorer (tiers 0, 1, 3)**
-- Planner: regime vector + contract → candidate topologies via hand-authored lookup table (§4 honest note). LLM used only for constrained generation over registry entries; never free-form.
-- Ledger: append-only, one file per entry in the git repo. Dual rendering per §9 (typed record + narrative generated at decision time). Narrative + final config is the audit surface, not the raw ledger.
-- **Derived index (cache, never authoritative):** SQLite or parquet index over regime vectors rebuilt from git contents; supports case-base nearest-neighbour retrieval. Git is not an index — retrieval degrades past ~10 cases at the 200–400 entries per problem §5 anticipates. Rebuild-from-git is a one-command operation.
-- Tier-0 (hard-constraint filter): free, filtering only.
-- Tier-1 (label-free proxies): scoped in the type system to intra-topology, intra-vocabulary comparisons only (§6 central risk). A tier-1 score is not orderable across topologies at the API level.
-- **Tier-3 minimal (pulled into v0, not deferred):** ingest a user-supplied ground-truth file (COCO for detection, MOT for tracking) and a scoring function. No annotation tooling, no adjudication UI — the human produces the file however they like. **All cross-topology selection routes through tier-3 exclusively.** Without this, M3 ships the exact §6 failure mode.
-- Drop existing VLM tuner in here as detection/association specialist.
+| M | Contents | Notes |
+|---|---|---|
+| M1 | Contracts & registry, schemas only, no runtime | The six interfaces in §16, as JSON Schemas + Pydantic bindings |
+| M2 | Profiler + feasibility gate, deterministic | Each §4 axis as an independent probe with confidence where proposal-dependent. Catalog-derived, version-pinned thresholds (§8). Probe-discrimination validation gates each probe |
+| M3 | Planner + ledger + tiers 0/1/3-minimal | Planner via §4.2 compositional rules; LLM only for constrained generation over registry entries. Ledger with dual rendering and derived index (§9.1). Tier 3 ingests COCO/MOT + scoring function — **this is what makes a multi-topology planner legitimate**. VLM tuner drops in here |
+| M4 | Packager + glue | Cost calibration pass (§13.1), config freeze, container build, replay bundle, ledger export. Predicate language for event logic (§12) — minimal grammar, not deferred. **v0 exits here** |
+| M4.5 | Proposal pipeline | Open-vocab + SAM2 proposals. **Load-bearing component is the sampling strategy, not the models** (§7). Two-phase: regime-stratified pass first, disagreement pass after initial candidates propose |
+| M5 | Adjudication UI | Review over M4.5 proposals, zero CV surface (§7). Emits the same COCO/MOT format M3 already ingests. **This milestone is the boundary between a developer tool and the product §1 describes** |
+| post-v0 | Tier-2 Bradley-Terry, case-base retrieval, drift monitor | Designed for now, built later |
 
-**M4 — Packager + minimal glue**
-- Config freeze, container build, replay bundle, ledger export.
-- Predicate language for event logic (§12), even a minimal grammar. Flagged as the most underestimated piece; do not defer.
-- **v0 exits here.** Post-v0 items designed for, not built: tier-2 VLM Bradley-Terry, case-base retrieval logic on top of the derived index, drift monitor.
+---
 
-**M4.5 — Proposal pipeline (out of v0; feeds M5)**
-- Open-vocab detector + SAM2 mask/box generation over sampled frames. Produces the proposal stream M5's UI reviews.
-- **Load-bearing component is the sampling strategy, not the models.** Uniform sampling of 200 frames returns the modal easy case; the eval set fails to cover regimes where candidate configs actually differ; tier-3 then produces false confidence with a credible number — **worse than no tier-3**.
-- Sampling stratifies over: (a) the §4 regime axes, and (b) **disagreement between candidate configs**. (b) is chicken-and-egg with M3's planner — expect a two-phase sampler: regime-stratified pass first, disagreement-augmented pass after initial candidates propose.
-- 200-frame budget × ~6 regimes × ~4 disagreement bands ≈ 8 frames/stratum. Tight, especially for rare-class detection recall (a rare class in a rare-regime stratum may have single-digit boxes total). Sampler must degrade cleanly under budget pressure (oversample regimes with low profiling confidence per §4.1; skip disagreement pass on unanimous regions).
-- **Tier-3 API exposes per-stratum confidence intervals, not a single point estimate.** A per-stratum CI is the only defence against the failure mode this milestone exists to prevent — a scalar tier-3 number derived from mixed-stratum counts silently reintroduces the false-confidence trap the sampling strategy is designed to eliminate.
+## 18. The validation gate
 
-**M5 — Adjudication UI (out of v0; product boundary)**
-- Auto-annotation review over the M4.5 proposal stream — accept / reject / nudge for detection, track-level events only for tracking. **Zero CV surface** — no mAP, no thresholds, no configs. A domain expert produces a ground-truth file without knowing what a ground-truth file is.
-- Output is the same COCO/MOT format that M3's tier-3 ingest already consumes; M4.5 + M5 together replace the "user produces this out-of-band" assumption from v0.
-- **v0 delivery boundary, stated explicitly:** v0 serves a pilot who can produce a ground-truth file out-of-band. §1's target user — a team that cannot get CV engineering headcount — is **not** served until M4.5 and M5 both ship. Scope claim, not design claim; belongs in v0 launch positioning.
+**Endpoint policy.** The LLM endpoint interface is provider-agnostic. Local and hosted are both configured in development. **Local is the ship gate; hosted is the diagnostic reference** for separating under-specified scaffolding from weak-model behaviour, which have opposite fixes. The §9 refutation-rate signal is the comparison instrument. Contracts are authored and validated against local first — if they drift toward what the hosted model can do, the gate silently stops constraining anything. Hosted-only failures are logged, not gating. The deployment airgap constraint stands: hosted is a dev-time tool, never on the runtime path.
 
-### Interfaces to freeze before writing code
-1. `TaskContract` — everything compiles against this; retrofits are expensive.
-2. `LedgerEntry` — schema drift silently corrupts the case base (§13).
-3. Registry component manifest — same reason. **Cost is a function of config, not a field.** Scalar cost is the schema change that most quietly ruins tier-0 and the case base.
-4. `EvalSet` (COCO/MOT reference + scorer id + catalog pin) — cross-topology selection depends on it; retrofitting means re-running search.
-5. `MappingRules` — per-axis rules + override table (see resolved decision). Adding a topology or a regime is a single-rule change against this schema, not a cell-grid rewrite.
+**Change detection is mechanical, not intentional.** Hash each contract's JSON Schema, pin the hashes in a manifest, CI fails on mismatch and re-runs the fixture suite against the local endpoint. A convention that developers remember to re-validate is not a gate.
 
-### Resolved decisions
-- **Language:** Python end-to-end. Single runtime for CV, orchestration, and schemas. Pydantic for the typed contracts in M1.
-- **LLM endpoint:** interface-agnostic; both a local on-prem endpoint and a hosted endpoint are configured in development. **Local is the ship gate; hosted is a diagnostic reference** for distinguishing under-specified scaffolding from weak-model behaviour — those have opposite fixes and running only local hides the distinction. The §9 refutation-rate signal is the comparison instrument. Deployment airgap constraint (§14) still holds — the hosted path is a dev-time tool, never on the runtime path. **Any change to a structured-output contract (LLM I/O schema) re-triggers local validation before the change lands** — otherwise the ship gate erodes one unaudited edit at a time.
-- **Ledger store:** files-in-git as the system of record; one append-only file per entry, catalog-version pinned per §13. **Derived SQLite/parquet index** rebuilt from git contents supports case-base nearest-neighbour retrieval — explicitly a cache, never authoritative. **Audit surface is the §9 narrative plus the final config**, with individual entries pulled on demand as backing evidence.
-  - **Cost is non-zero and named:** ~400 entries per problem at ~2 KB per entry × 100 problems ≈ 40K files and <100 MB. Full rebuild is seconds to low minutes. Steady-state ingest is **incremental, keyed on last-seen commit SHA** — O(new entries). Full rebuild remains the migration path for §13 catalog-version transitions.
-- **Catalog v0 breadth:** four axes, 24 topologies:
-  - detector ∈ {general closed-set, open-vocab, small-object architecture}
-  - tile ∈ {off, on}
-  - tracker ∈ {motion-only, appearance-assisted}
-  - reid ∈ {off, on}
+| Check | Threshold | Gating |
+|---|---|---|
+| Conformance | ≥98% of ~100 fixture inputs spanning regimes return schema-valid parseable output | Yes |
+| Referential integrity | 100% of referenced component/param names resolve to real registry entries | Yes, hard fail. Constrained generation should make this unreachable |
+| Refutation rate (§9) | None yet | **No.** No baseline exists, so any floor set now is invented. Log from day one; set after ~20 solved problems |
 
-  Components chosen to **span the regime axes**, not to be individually best. Tiling a general detector and the small-object architecture **overlap deliberately on the pixels-on-target axis** — keep both. That axis has the least predictable outcome and resolving it empirically is what the case base is for. Revisit after ~10 cases with evidence, not before.
+---
 
-  Rationale for shipping small: catalog breadth is gated by profiler discriminative power, not the reverse. See mapping-rules decision below — the "hand-authored table" is now per-axis rules, not a cell grid, but the profiler still has to *distinguish* enough regimes to make more axes useful.
+## 19. Decision log
 
-- **Regime→topology mapping structure: per-axis rules + override table.** Author one rule per regime axis, each constraining the catalog dimensions it physically implicates. Compose by intersection:
+### Resolved
 
-  | Regime axis | Constrains |
-  |---|---|
-  | pixels-on-target | {detector, tile} |
-  | congestion | {tracker} |
-  | motion dynamics | {tracker} |
-  | appearance separability | {reid} |
-  | target novelty | {detector} |
-
-  That is 6–8 rules, O(regimes + topologies), not O(regimes × topologies). Growing either axis costs one rule, not 50 cells.
-
-  Composition misses genuine joint interactions (e.g. congestion says appearance-assisted while motion dynamics says motion-only — same axis, opposite implications). **Layer a short override table on top of the compositional defaults for known joint interactions.** Discovery mechanism for overrides is stricter than "look at `confirmed` verdicts on the joint-refinement pass" — that pass is marked `confounded` in §9 for exactly this reason, and joint-pass `confirmed` verdicts cannot be causally attributed to any single axis pair. An override is promoted only when **two single-variable deltas along the axes in question each fail (refuted or inconclusive) to explain the observed improvement** — that isolates the interaction. Anything weaker is a candidate for further probing, not a decision. Overrides added without this evidence are correlational noise.
-
-  **Pending §4 amendment:** §4's "It is a lookup table with a language model on the front" language now describes the wrong structure. The claim should say "per-axis rules composed by intersection, with an evidence-backed override table for known joint interactions." Deferred to design agents per the "no in-place §1–16 edits" standing instruction — flag in chat.
+- **Language:** Python end-to-end, Pydantic for typed contracts.
+- **Endpoint:** provider-agnostic; local gates, hosted diagnoses (§18).
+- **Ledger store:** files-in-git authoritative, derived index as rebuildable cache, incremental ingest on commit SHA (§9.1).
+- **v0 catalog:** four axes, 24 topologies (§15).
+- **Regime mapping:** compositional per-axis rules plus override table with the two-delta promotion criterion (§4.2).
+- **Tier 3 in v0:** minimal form, GT file + scoring function; UI deferred to M5.
+- **Cost:** two-tier, reference for search and target-measured for the tier-0 gate (§13.1).
+- **Eval sampling:** split eval set (regime strata, scored) from diagnostic set (disagreement, never scored) (§7.1).
 
 ### Superseded
-- ~~LLM endpoint: local on-prem from day one, no hosted-API code path in v0.~~ Conflated deployment constraint with development constraint; running only local makes it impossible to distinguish scaffolding weakness from model weakness.
-- ~~Ledger audit surface: diff-review of ledger PRs.~~ Nobody reviews 400 JSON files; audit is narrative + config, entries pulled on demand.
-- ~~Tier-3 deferred to post-v0; M3 ships tier-0/1 only.~~ Would ship a multi-topology planner scored only by tier-1, reinstating the §6 failure mode. Minimal tier-3 (COCO/MOT file + scorer, no UI) pulled into M3.
-- ~~Feasibility rule thresholds hardcoded (e.g. "useful recall below ~20 px").~~ Must be measured against the catalog and versioned with it per §13; hardcoded values go silently wrong on catalog change.
-- ~~Catalog v0 is three-axis (3×2×2 = 12 topologies).~~ Missed the scale/tile axis from §5; corrected to four-axis, 24 topologies (see resolved).
-- ~~Regime→topology mapping as an enumerated cell grid (~24 topologies × 6–8 regimes ≈ 150 cells).~~ Replaced by per-axis compositional rules + evidence-backed override table (O(regimes + topologies)). Growth costs one rule, not 50 cells.
-- ~~Component cost as a scalar field on the registry manifest.~~ Cost is a function of config, measured on target hardware and versioned with the catalog. Scalar cost quietly breaks tier-0 filtering — the case base then learns that tiling is free.
 
-### Risks — amendments to §14
-
-| Risk | Severity | Mitigation |
+| Was | Now | Why |
 |---|---|---|
-| Uniform-sampled eval set produces false confidence in tier-3 | Critical | Stratified sampling over regime axes + candidate-config disagreement (M4.5). Uniform sampling returns the modal easy case; tier-3 then rank-orders configs that never disagreed on anything hard. Tier-3 API returns per-stratum CIs, never a scalar mixed over strata. |
-| Scalar declared cost lets tier-0 gate mis-price tiling | High | Cost is a function of config, measured on target hardware, versioned with catalog. See M1 registry manifest. |
-| Compositional mapping misses joint interactions between regime axes | Medium | Override table on top of per-axis rules; overrides added only from §9 `confirmed` ledger verdicts, not intuition. |
+| Local on-prem only, no hosted code path in v0 | Both configured; local gates, hosted diagnoses | Local-only makes under-specified scaffolding indistinguishable from a weak model |
+| Tier 3 deferred to post-v0 | Minimal tier 3 in M3 | M3 ships a multi-topology planner; tier-1-only selection is the §6 failure mode |
+| Ledger PR diff-review is a real audit surface | It is not | Nobody reviews 400 JSON files |
+| M5 contains "nothing else" | Split M4.5 / M5 | The UI sits on a non-trivial proposal + sampling pipeline |
+| Component cost as a scalar manifest field | Two-tier measured cost function (§13.1) | A flat field teaches the case base that tiling is free |
+| Cost measured on target hardware, full stop | Reference cost for search, target cost for the gate | Unimplementable as stated — the planner needs an estimate before target hardware is in the loop |
+| Regime → topology as a dense cell table | Compositional per-axis rules | 24 topologies × 6–10 regimes crosses 200 cells; composition is O(regimes + topologies) |
+| Overrides promoted from `confirmed` ledger verdicts | Two failed single-variable deltas required | Joint-pass entries are `confounded` by §9 and cannot be attributed to an axis pair |
+| Catalog v0 is three-axis (12 topologies) | Four-axis, 24 | Scale/tile axis was dropped from the enumeration by mistake |
+| One eval set, sampled on regime × disagreement | Two sets (§7.1) | 24 strata at ~62 boxes gives ±7.5-pt CIs — exclusion only, useless for ranking |
+| Eval budget ~200 frames / 1.5–2.5 h | ~2,300 boxes / 2.5–4 h detection, plus tracking and diagnostic | Original figure was derived for unstratified review |
+| Feasibility thresholds hardcoded | Catalog-derived, version-pinned | Hardcoded values go silently wrong on catalog change |
+| §§1–16 append-only, changes go to Implementation notes | Body is editable; reversals recorded here | The rule produced the §5/§15 catalog contradiction |
 
-### §4.1 proposal — profiler bootstrap
+### Open
 
-The profiler has a bootstrap problem not addressed in §4. Pixels-on-target and congestion are measured from proposals, so if the open-vocab detector falls in the failed half of the bimodal open-vocab regime (§14 row 3), the regime vector is garbage and every downstream decision is confidently wrong on bad input.
+- Second vertical, after surveillance/security/inspection.
+- Whether the deliberate §15 overlap survives ~10 solved cases.
+- Whether 6 regime strata is the right granularity, or whether some axes need splitting once §4.1 confidence data exists — each split multiplies the §7.2 budget.
+- Tracking eval budget has not had the §7.2 treatment. Track-level event review is a different unit than boxes and the 3-clip figure is inherited, not derived.
 
-- Probes must be detector-independent where possible (e.g. optical-flow magnitude, frame intensity variance, saturation/clipping — none require object proposals).
-- Where a probe is unavoidably proposal-dependent (pixels-on-target, congestion, appearance separability), it **emits a confidence alongside the value**.
-- The feasibility gate (§8) **refuses on low profiling confidence** rather than proceeding. No verdict beats a confident-wrong verdict for a team without a CV engineer to interpret it.
-- **Probe-discrimination validation** lives in M2: each probe demonstrates on a held-out regime set that it separates regimes it claims to distinguish. Failure to discriminate is a shipping blocker for that probe.
+---
 
-### Still open
-- Nothing currently blocking v0 milestone entry.
+## 20. Research angle
+
+No benchmark exists of `(spec, data, expected pipeline)` triplets. Defining one is a real contribution independent of the system itself.
