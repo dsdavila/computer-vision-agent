@@ -227,3 +227,47 @@ That yields an end-to-end spine in weeks. The scoring stack is the piece that ge
 ## 16. Research angle
 
 No benchmark exists of `(spec, data, expected pipeline)` triplets. Defining one is a real contribution independent of the system itself.
+
+---
+
+## Implementation notes
+
+Living section. Appended to as implementation proceeds. Notes are proposals until the design agents/human confirm.
+
+### Milestone plan (v0 spine, per §15)
+
+**M1 — Contracts & registry (schemas only, no runtime)**
+- `TaskContract` schema: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria.
+- `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, cost, license, pinned catalog version (§13).
+- `LedgerEntry` schema exactly as §9 — `hypothesis`, `verdict`, `scorer_tier`, `confounded`, `provenance` are non-negotiable.
+- `RegimeVector` schema for §4 axes.
+- Output: language-agnostic JSON Schemas + generated typed bindings. Everything downstream compiles against these.
+
+**M2 — Profiler + feasibility gate (deterministic, no LLM)**
+- Each §4 axis implemented as an independent probe returning a scalar or distribution.
+- Feasibility gate is a rule table over regime vector → verdict with a physical-reason string (§8). Ship with ~6 hard rules to start (pixels-on-target floor, congestion ceiling, appearance-separability minimum for ReID, etc.).
+- Deliverable: `profile(video) → RegimeVector`; `feasibility(contract, regime) → Verdict`.
+
+**M3 — Planner + ledger + tier-0/1 scorer**
+- Planner: regime vector + contract → candidate topologies via hand-authored lookup table (§4 honest note). LLM used only for constrained generation over registry entries; never free-form.
+- Ledger: append-only store, dual rendering (typed record + narrative generated at decision time per §9).
+- Tier-0 (hard-constraint filter) and Tier-1 (label-free proxies). Enforce in the type system that Tier-1 scores are only comparable *within* an equivalence class (§6 central risk).
+- Drop existing VLM tuner in here as the detection/association specialist.
+
+**M4 — Packager + minimal glue**
+- Config freeze, container build, replay bundle, ledger export.
+- Predicate language for event logic (§12) — even a minimal grammar. Flagged as the most underestimated piece; do not defer.
+- Explicitly deferred to post-v0: tier-2 VLM Bradley-Terry, tier-3 human adjudication UI, case base retrieval, drift monitor. Designed-for now, built later.
+
+### Interfaces to freeze before writing code
+1. `TaskContract` — everything compiles against this; retrofits are expensive.
+2. `LedgerEntry` — schema drift silently corrupts the case base (§13).
+3. Registry component manifest — same reason.
+
+### Resolved decisions
+- **Language:** Python end-to-end. Single runtime for CV, orchestration, and schemas. Pydantic for the typed contracts in M1.
+- **LLM endpoint:** local on-prem from day one. Matches §14 on-prem-degradation risk row and the airgap constraint; no hosted-API code path in v0. Structured-output contracts must be tight enough that a weaker model produces a worse pipeline, not a broken run.
+- **Ledger store:** files-in-git. One append-only file per ledger entry, catalog-version pinned in the entry (§13). Gives free provenance for regulated review (§11), works airgapped, and diff-review of ledger PRs is a real audit surface. Case base is a directory of resolved cases in the same repo.
+
+### Still open
+- **Catalog v0 breadth.** §5 assumes ~8 detectors × 4 scale strategies × 5 trackers × 4 ReID. Ship v0 smaller (say 3×2×2×2) and grow, or invest in full breadth up front? Smaller catalog keeps the regime→topology lookup table (§4) hand-authorable in week one.
