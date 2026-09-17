@@ -263,7 +263,13 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 **M4 — Packager + minimal glue**
 - Config freeze, container build, replay bundle, ledger export.
 - Predicate language for event logic (§12), even a minimal grammar. Flagged as the most underestimated piece; do not defer.
-- **Deferred to post-v0 (designed for, not built):** tier-2 VLM Bradley-Terry, tier-3 **adjudication UI** (the eval-set *format* is v0; the *tool* that helps a domain expert produce it is not), case-base retrieval logic on top of the derived index, drift monitor.
+- **v0 exits here.** Post-v0 items designed for, not built: tier-2 VLM Bradley-Terry, case-base retrieval logic on top of the derived index, drift monitor.
+
+**M5 — Adjudication UI (out of v0; product boundary)**
+- Milestone contains this and nothing else.
+- The interface §7 defines: auto-annotation review over open-vocab + SAM2 proposals — accept / reject / nudge for detection, track-level events only for tracking. **Zero CV surface** — no mAP, no thresholds, no configs. A domain expert produces a ground-truth file without knowing what a ground-truth file is.
+- Output is the same COCO/MOT format that M3's tier-3 ingest already consumes; M5 replaces the "user produces this out-of-band" assumption from v0.
+- **v0 delivery boundary, stated explicitly:** v0 serves a pilot who can produce a ground-truth file out-of-band. §1's target user — a team that cannot get CV engineering headcount — is **not** served until M5 ships. This is a scope claim, not a design claim, and belongs in v0 launch positioning.
 
 ### Interfaces to freeze before writing code
 1. `TaskContract` — everything compiles against this; retrofits are expensive.
@@ -273,15 +279,25 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 
 ### Resolved decisions
 - **Language:** Python end-to-end. Single runtime for CV, orchestration, and schemas. Pydantic for the typed contracts in M1.
-- **LLM endpoint:** interface-agnostic; both a local on-prem endpoint and a hosted endpoint are configured in development. **Local is the ship gate; hosted is a diagnostic reference** for distinguishing under-specified scaffolding from weak-model behaviour — those have opposite fixes and running only local hides the distinction. The §9 refutation-rate signal is the comparison instrument. Deployment airgap constraint (§14) still holds — the hosted path is a dev-time tool, never on the runtime path.
+- **LLM endpoint:** interface-agnostic; both a local on-prem endpoint and a hosted endpoint are configured in development. **Local is the ship gate; hosted is a diagnostic reference** for distinguishing under-specified scaffolding from weak-model behaviour — those have opposite fixes and running only local hides the distinction. The §9 refutation-rate signal is the comparison instrument. Deployment airgap constraint (§14) still holds — the hosted path is a dev-time tool, never on the runtime path. **Any change to a structured-output contract (LLM I/O schema) re-triggers local validation before the change lands** — otherwise the ship gate erodes one unaudited edit at a time.
 - **Ledger store:** files-in-git as the system of record; one append-only file per entry, catalog-version pinned per §13. **Derived SQLite/parquet index** rebuilt from git contents supports case-base nearest-neighbour retrieval — explicitly a cache, never authoritative. **Audit surface is the §9 narrative plus the final config**, with individual entries pulled on demand as backing evidence.
-- **Catalog v0 breadth:** ship small — detector ∈ {small-object/tiling, general, open-vocab}, tracker ∈ {motion-only, appearance-assisted}, ReID ∈ {on, off}. Components chosen to **span the regime axes**, not to be individually best. Rationale: the regime→topology mapping is hand-authored (§4), so authoring cost scales as catalog size × distinguishable regimes; a v0 profiler resolving 6–8 regimes leaves most of a 640-topology catalog unreachable by the mapping regardless of component quality. Catalog breadth is gated by profiler discriminative power, not the reverse. Sparse case-base coverage compounds the effect.
+  - **Cost is non-zero and named:** ~400 entries per problem at ~2 KB per entry × 100 problems ≈ 40K files and <100 MB. Full rebuild is seconds to low minutes. Steady-state ingest is **incremental, keyed on last-seen commit SHA** — O(new entries). Full rebuild remains the migration path for §13 catalog-version transitions.
+- **Catalog v0 breadth:** four axes, 24 topologies:
+  - detector ∈ {general closed-set, open-vocab, small-object architecture}
+  - tile ∈ {off, on}
+  - tracker ∈ {motion-only, appearance-assisted}
+  - reid ∈ {off, on}
+
+  Components chosen to **span the regime axes**, not to be individually best. Tiling a general detector and the small-object architecture **overlap deliberately on the pixels-on-target axis** — keep both. That axis has the least predictable outcome and resolving it empirically is what the case base is for. Revisit after ~10 cases with evidence, not before.
+
+  Rationale for shipping small: the regime→topology mapping is hand-authored (§4), so authoring cost scales as catalog size × distinguishable regimes; a v0 profiler resolving 6–8 regimes leaves most of a 640-topology catalog unreachable by the mapping regardless of component quality. Catalog breadth is gated by profiler discriminative power, not the reverse. Sparse case-base coverage compounds the effect.
 
 ### Superseded
 - ~~LLM endpoint: local on-prem from day one, no hosted-API code path in v0.~~ Conflated deployment constraint with development constraint; running only local makes it impossible to distinguish scaffolding weakness from model weakness.
 - ~~Ledger audit surface: diff-review of ledger PRs.~~ Nobody reviews 400 JSON files; audit is narrative + config, entries pulled on demand.
 - ~~Tier-3 deferred to post-v0; M3 ships tier-0/1 only.~~ Would ship a multi-topology planner scored only by tier-1, reinstating the §6 failure mode. Minimal tier-3 (COCO/MOT file + scorer, no UI) pulled into M3.
 - ~~Feasibility rule thresholds hardcoded (e.g. "useful recall below ~20 px").~~ Must be measured against the catalog and versioned with it per §13; hardcoded values go silently wrong on catalog change.
+- ~~Catalog v0 is three-axis (3×2×2 = 12 topologies).~~ Missed the scale/tile axis from §5; corrected to four-axis, 24 topologies (see resolved).
 
 ### §4.1 proposal — profiler bootstrap
 
@@ -293,4 +309,4 @@ The profiler has a bootstrap problem not addressed in §4. Pixels-on-target and 
 - **Probe-discrimination validation** lives in M2: each probe demonstrates on a held-out regime set that it separates regimes it claims to distinguish. Failure to discriminate is a shipping blocker for that probe.
 
 ### Still open
-- Nothing currently blocking v0 milestone entry. Enumerated catalog components are the v0 set unless the design agents flag a missing axis (see reviewer-inconsistency note in chat: enumeration is three-axis, feedback quoted four).
+- Nothing currently blocking v0 milestone entry.
