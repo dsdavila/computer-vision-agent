@@ -240,34 +240,57 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 - `TaskContract` schema: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria.
 - `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, cost, license, pinned catalog version (§13).
 - `LedgerEntry` schema exactly as §9 — `hypothesis`, `verdict`, `scorer_tier`, `confounded`, `provenance` are non-negotiable.
-- `RegimeVector` schema for §4 axes.
-- Output: language-agnostic JSON Schemas + generated typed bindings. Everything downstream compiles against these.
+- `RegimeVector` schema for §4 axes, extended with a per-axis confidence field (see §4.1 proposal below).
+- `EvalSet` schema: reference to a ground-truth file (COCO for detection, MOT for tracking) plus scoring-function identifier and catalog-version pin.
+- Output: language-agnostic JSON Schemas + generated typed bindings (Pydantic). Everything downstream compiles against these.
 
 **M2 — Profiler + feasibility gate (deterministic, no LLM)**
-- Each §4 axis implemented as an independent probe returning a scalar or distribution.
-- Feasibility gate is a rule table over regime vector → verdict with a physical-reason string (§8). Ship with ~6 hard rules to start (pixels-on-target floor, congestion ceiling, appearance-separability minimum for ReID, etc.).
+- Each §4 axis implemented as an independent probe returning a scalar or distribution, plus a **confidence** value where the probe cannot be made detector-independent (§4.1).
+- Feasibility gate is a rule table over regime vector → verdict with a physical-reason string (§8). **Rule thresholds are catalog-derived and pinned to the catalog version that produced them (§13), not hardcoded** — a hardcoded threshold silently goes wrong the first time the catalog changes.
+- Starting rule set: pixels-on-target floor, congestion ceiling, appearance-separability minimum for ReID, and a **low-profiling-confidence refusal** (§4.1) — no verdict is preferable to a confident-wrong verdict on bad input.
+- **Probe-discrimination validation:** each probe must demonstrate that it separates a held-out regime set before entering the vector. No unvalidated probe ships. Right now nothing in the design checks that probes actually discriminate; this closes that gap.
 - Deliverable: `profile(video) → RegimeVector`; `feasibility(contract, regime) → Verdict`.
 
-**M3 — Planner + ledger + tier-0/1 scorer**
+**M3 — Planner + ledger + tiered scorer (tiers 0, 1, 3)**
 - Planner: regime vector + contract → candidate topologies via hand-authored lookup table (§4 honest note). LLM used only for constrained generation over registry entries; never free-form.
-- Ledger: append-only store, dual rendering (typed record + narrative generated at decision time per §9).
-- Tier-0 (hard-constraint filter) and Tier-1 (label-free proxies). Enforce in the type system that Tier-1 scores are only comparable *within* an equivalence class (§6 central risk).
-- Drop existing VLM tuner in here as the detection/association specialist.
+- Ledger: append-only, one file per entry in the git repo. Dual rendering per §9 (typed record + narrative generated at decision time). Narrative + final config is the audit surface, not the raw ledger.
+- **Derived index (cache, never authoritative):** SQLite or parquet index over regime vectors rebuilt from git contents; supports case-base nearest-neighbour retrieval. Git is not an index — retrieval degrades past ~10 cases at the 200–400 entries per problem §5 anticipates. Rebuild-from-git is a one-command operation.
+- Tier-0 (hard-constraint filter): free, filtering only.
+- Tier-1 (label-free proxies): scoped in the type system to intra-topology, intra-vocabulary comparisons only (§6 central risk). A tier-1 score is not orderable across topologies at the API level.
+- **Tier-3 minimal (pulled into v0, not deferred):** ingest a user-supplied ground-truth file (COCO for detection, MOT for tracking) and a scoring function. No annotation tooling, no adjudication UI — the human produces the file however they like. **All cross-topology selection routes through tier-3 exclusively.** Without this, M3 ships the exact §6 failure mode.
+- Drop existing VLM tuner in here as detection/association specialist.
 
 **M4 — Packager + minimal glue**
 - Config freeze, container build, replay bundle, ledger export.
-- Predicate language for event logic (§12) — even a minimal grammar. Flagged as the most underestimated piece; do not defer.
-- Explicitly deferred to post-v0: tier-2 VLM Bradley-Terry, tier-3 human adjudication UI, case base retrieval, drift monitor. Designed-for now, built later.
+- Predicate language for event logic (§12), even a minimal grammar. Flagged as the most underestimated piece; do not defer.
+- **Deferred to post-v0 (designed for, not built):** tier-2 VLM Bradley-Terry, tier-3 **adjudication UI** (the eval-set *format* is v0; the *tool* that helps a domain expert produce it is not), case-base retrieval logic on top of the derived index, drift monitor.
 
 ### Interfaces to freeze before writing code
 1. `TaskContract` — everything compiles against this; retrofits are expensive.
 2. `LedgerEntry` — schema drift silently corrupts the case base (§13).
 3. Registry component manifest — same reason.
+4. `EvalSet` (COCO/MOT reference + scorer id + catalog pin) — cross-topology selection depends on it; retrofitting means re-running search.
 
 ### Resolved decisions
 - **Language:** Python end-to-end. Single runtime for CV, orchestration, and schemas. Pydantic for the typed contracts in M1.
-- **LLM endpoint:** local on-prem from day one. Matches §14 on-prem-degradation risk row and the airgap constraint; no hosted-API code path in v0. Structured-output contracts must be tight enough that a weaker model produces a worse pipeline, not a broken run.
-- **Ledger store:** files-in-git. One append-only file per ledger entry, catalog-version pinned in the entry (§13). Gives free provenance for regulated review (§11), works airgapped, and diff-review of ledger PRs is a real audit surface. Case base is a directory of resolved cases in the same repo.
+- **LLM endpoint:** interface-agnostic; both a local on-prem endpoint and a hosted endpoint are configured in development. **Local is the ship gate; hosted is a diagnostic reference** for distinguishing under-specified scaffolding from weak-model behaviour — those have opposite fixes and running only local hides the distinction. The §9 refutation-rate signal is the comparison instrument. Deployment airgap constraint (§14) still holds — the hosted path is a dev-time tool, never on the runtime path.
+- **Ledger store:** files-in-git as the system of record; one append-only file per entry, catalog-version pinned per §13. **Derived SQLite/parquet index** rebuilt from git contents supports case-base nearest-neighbour retrieval — explicitly a cache, never authoritative. **Audit surface is the §9 narrative plus the final config**, with individual entries pulled on demand as backing evidence.
+- **Catalog v0 breadth:** ship small — detector ∈ {small-object/tiling, general, open-vocab}, tracker ∈ {motion-only, appearance-assisted}, ReID ∈ {on, off}. Components chosen to **span the regime axes**, not to be individually best. Rationale: the regime→topology mapping is hand-authored (§4), so authoring cost scales as catalog size × distinguishable regimes; a v0 profiler resolving 6–8 regimes leaves most of a 640-topology catalog unreachable by the mapping regardless of component quality. Catalog breadth is gated by profiler discriminative power, not the reverse. Sparse case-base coverage compounds the effect.
+
+### Superseded
+- ~~LLM endpoint: local on-prem from day one, no hosted-API code path in v0.~~ Conflated deployment constraint with development constraint; running only local makes it impossible to distinguish scaffolding weakness from model weakness.
+- ~~Ledger audit surface: diff-review of ledger PRs.~~ Nobody reviews 400 JSON files; audit is narrative + config, entries pulled on demand.
+- ~~Tier-3 deferred to post-v0; M3 ships tier-0/1 only.~~ Would ship a multi-topology planner scored only by tier-1, reinstating the §6 failure mode. Minimal tier-3 (COCO/MOT file + scorer, no UI) pulled into M3.
+- ~~Feasibility rule thresholds hardcoded (e.g. "useful recall below ~20 px").~~ Must be measured against the catalog and versioned with it per §13; hardcoded values go silently wrong on catalog change.
+
+### §4.1 proposal — profiler bootstrap
+
+The profiler has a bootstrap problem not addressed in §4. Pixels-on-target and congestion are measured from proposals, so if the open-vocab detector falls in the failed half of the bimodal open-vocab regime (§14 row 3), the regime vector is garbage and every downstream decision is confidently wrong on bad input.
+
+- Probes must be detector-independent where possible (e.g. optical-flow magnitude, frame intensity variance, saturation/clipping — none require object proposals).
+- Where a probe is unavoidably proposal-dependent (pixels-on-target, congestion, appearance separability), it **emits a confidence alongside the value**.
+- The feasibility gate (§8) **refuses on low profiling confidence** rather than proceeding. No verdict beats a confident-wrong verdict for a team without a CV engineer to interpret it.
+- **Probe-discrimination validation** lives in M2: each probe demonstrates on a held-out regime set that it separates regimes it claims to distinguish. Failure to discriminate is a shipping blocker for that probe.
 
 ### Still open
-- **Catalog v0 breadth.** §5 assumes ~8 detectors × 4 scale strategies × 5 trackers × 4 ReID. Ship v0 smaller (say 3×2×2×2) and grow, or invest in full breadth up front? Smaller catalog keeps the regime→topology lookup table (§4) hand-authorable in week one.
+- Nothing currently blocking v0 milestone entry. Enumerated catalog components are the v0 set unless the design agents flag a missing axis (see reviewer-inconsistency note in chat: enumeration is three-axis, feedback quoted four).
