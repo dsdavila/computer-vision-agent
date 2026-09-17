@@ -238,10 +238,11 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 
 **M1 — Contracts & registry (schemas only, no runtime)**
 - `TaskContract` schema: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria.
-- `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, cost, license, pinned catalog version (§13).
+- `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, license, pinned catalog version (§13). **Cost is not a scalar field** — it is a function of config, measured on target hardware and cached with the catalog version, not declared. Tiling cost scales roughly as tile-count × overlap-factor (2×2 with overlap ≈ 4–5× single-pass); scalar cost lets the case base learn that tiling is free.
 - `LedgerEntry` schema exactly as §9 — `hypothesis`, `verdict`, `scorer_tier`, `confounded`, `provenance` are non-negotiable.
 - `RegimeVector` schema for §4 axes, extended with a per-axis confidence field (see §4.1 proposal below).
 - `EvalSet` schema: reference to a ground-truth file (COCO for detection, MOT for tracking) plus scoring-function identifier and catalog-version pin.
+- `MappingRules` schema (see resolved decision below): per-axis rules + override table for known joint interactions.
 - Output: language-agnostic JSON Schemas + generated typed bindings (Pydantic). Everything downstream compiles against these.
 
 **M2 — Profiler + feasibility gate (deterministic, no LLM)**
@@ -265,17 +266,23 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 - Predicate language for event logic (§12), even a minimal grammar. Flagged as the most underestimated piece; do not defer.
 - **v0 exits here.** Post-v0 items designed for, not built: tier-2 VLM Bradley-Terry, case-base retrieval logic on top of the derived index, drift monitor.
 
+**M4.5 — Proposal pipeline (out of v0; feeds M5)**
+- Open-vocab detector + SAM2 mask/box generation over sampled frames. Produces the proposal stream M5's UI reviews.
+- **Load-bearing component is the sampling strategy, not the models.** Uniform sampling of 200 frames returns the modal easy case; the eval set fails to cover regimes where candidate configs actually differ; tier-3 then produces false confidence with a credible number — **worse than no tier-3**.
+- Sampling stratifies over: (a) the §4 regime axes, and (b) **disagreement between candidate configs**. (b) is chicken-and-egg with M3's planner — expect a two-phase sampler: regime-stratified pass first, disagreement-augmented pass after initial candidates propose.
+- 200-frame budget × ~6 regimes × ~4 disagreement bands ≈ 8 frames/stratum. Tight, especially for rare-class detection recall. Sampler must degrade cleanly under budget pressure (oversample regimes with low profiling confidence per §4.1; skip disagreement pass on unanimous regions).
+
 **M5 — Adjudication UI (out of v0; product boundary)**
-- Milestone contains this and nothing else.
-- The interface §7 defines: auto-annotation review over open-vocab + SAM2 proposals — accept / reject / nudge for detection, track-level events only for tracking. **Zero CV surface** — no mAP, no thresholds, no configs. A domain expert produces a ground-truth file without knowing what a ground-truth file is.
-- Output is the same COCO/MOT format that M3's tier-3 ingest already consumes; M5 replaces the "user produces this out-of-band" assumption from v0.
-- **v0 delivery boundary, stated explicitly:** v0 serves a pilot who can produce a ground-truth file out-of-band. §1's target user — a team that cannot get CV engineering headcount — is **not** served until M5 ships. This is a scope claim, not a design claim, and belongs in v0 launch positioning.
+- Auto-annotation review over the M4.5 proposal stream — accept / reject / nudge for detection, track-level events only for tracking. **Zero CV surface** — no mAP, no thresholds, no configs. A domain expert produces a ground-truth file without knowing what a ground-truth file is.
+- Output is the same COCO/MOT format that M3's tier-3 ingest already consumes; M4.5 + M5 together replace the "user produces this out-of-band" assumption from v0.
+- **v0 delivery boundary, stated explicitly:** v0 serves a pilot who can produce a ground-truth file out-of-band. §1's target user — a team that cannot get CV engineering headcount — is **not** served until M4.5 and M5 both ship. Scope claim, not design claim; belongs in v0 launch positioning.
 
 ### Interfaces to freeze before writing code
 1. `TaskContract` — everything compiles against this; retrofits are expensive.
 2. `LedgerEntry` — schema drift silently corrupts the case base (§13).
-3. Registry component manifest — same reason.
+3. Registry component manifest — same reason. **Cost is a function of config, not a field.** Scalar cost is the schema change that most quietly ruins tier-0 and the case base.
 4. `EvalSet` (COCO/MOT reference + scorer id + catalog pin) — cross-topology selection depends on it; retrofitting means re-running search.
+5. `MappingRules` — per-axis rules + override table (see resolved decision). Adding a topology or a regime is a single-rule change against this schema, not a cell-grid rewrite.
 
 ### Resolved decisions
 - **Language:** Python end-to-end. Single runtime for CV, orchestration, and schemas. Pydantic for the typed contracts in M1.
@@ -290,7 +297,23 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 
   Components chosen to **span the regime axes**, not to be individually best. Tiling a general detector and the small-object architecture **overlap deliberately on the pixels-on-target axis** — keep both. That axis has the least predictable outcome and resolving it empirically is what the case base is for. Revisit after ~10 cases with evidence, not before.
 
-  Rationale for shipping small: the regime→topology mapping is hand-authored (§4), so authoring cost scales as catalog size × distinguishable regimes; a v0 profiler resolving 6–8 regimes leaves most of a 640-topology catalog unreachable by the mapping regardless of component quality. Catalog breadth is gated by profiler discriminative power, not the reverse. Sparse case-base coverage compounds the effect.
+  Rationale for shipping small: catalog breadth is gated by profiler discriminative power, not the reverse. See mapping-rules decision below — the "hand-authored table" is now per-axis rules, not a cell grid, but the profiler still has to *distinguish* enough regimes to make more axes useful.
+
+- **Regime→topology mapping structure: per-axis rules + override table.** Author one rule per regime axis, each constraining the catalog dimensions it physically implicates. Compose by intersection:
+
+  | Regime axis | Constrains |
+  |---|---|
+  | pixels-on-target | {detector, tile} |
+  | congestion | {tracker} |
+  | motion dynamics | {tracker} |
+  | appearance separability | {reid} |
+  | target novelty | {detector} |
+
+  That is 6–8 rules, O(regimes + topologies), not O(regimes × topologies). Growing either axis costs one rule, not 50 cells.
+
+  Composition misses genuine joint interactions (e.g. congestion says appearance-assisted while motion dynamics says motion-only — same axis, opposite implications). **Layer a short override table on top of the compositional defaults for known joint interactions.** Discovery mechanism for overrides is not the author's intuition — it is §9 `confirmed` verdicts on the bounded joint-refinement pass (§5). Overrides added without ledger evidence are candidates, not decisions.
+
+  **Pending §4 amendment:** §4's "It is a lookup table with a language model on the front" language now describes the wrong structure. The claim should say "per-axis rules composed by intersection, with an evidence-backed override table for known joint interactions." Deferred to design agents per the "no in-place §1–16 edits" standing instruction — flag in chat.
 
 ### Superseded
 - ~~LLM endpoint: local on-prem from day one, no hosted-API code path in v0.~~ Conflated deployment constraint with development constraint; running only local makes it impossible to distinguish scaffolding weakness from model weakness.
@@ -298,6 +321,16 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 - ~~Tier-3 deferred to post-v0; M3 ships tier-0/1 only.~~ Would ship a multi-topology planner scored only by tier-1, reinstating the §6 failure mode. Minimal tier-3 (COCO/MOT file + scorer, no UI) pulled into M3.
 - ~~Feasibility rule thresholds hardcoded (e.g. "useful recall below ~20 px").~~ Must be measured against the catalog and versioned with it per §13; hardcoded values go silently wrong on catalog change.
 - ~~Catalog v0 is three-axis (3×2×2 = 12 topologies).~~ Missed the scale/tile axis from §5; corrected to four-axis, 24 topologies (see resolved).
+- ~~Regime→topology mapping as an enumerated cell grid (~24 topologies × 6–8 regimes ≈ 150 cells).~~ Replaced by per-axis compositional rules + evidence-backed override table (O(regimes + topologies)). Growth costs one rule, not 50 cells.
+- ~~Component cost as a scalar field on the registry manifest.~~ Cost is a function of config, measured on target hardware and versioned with the catalog. Scalar cost quietly breaks tier-0 filtering — the case base then learns that tiling is free.
+
+### Risks — amendments to §14
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| Uniform-sampled eval set produces false confidence in tier-3 | Critical | Stratified sampling over regime axes + candidate-config disagreement (M4.5). Uniform sampling returns the modal easy case; tier-3 then rank-orders configs that never disagreed on anything hard. |
+| Scalar declared cost lets tier-0 gate mis-price tiling | High | Cost is a function of config, measured on target hardware, versioned with catalog. See M1 registry manifest. |
+| Compositional mapping misses joint interactions between regime axes | Medium | Override table on top of per-axis rules; overrides added only from §9 `confirmed` ledger verdicts, not intuition. |
 
 ### §4.1 proposal — profiler bootstrap
 
