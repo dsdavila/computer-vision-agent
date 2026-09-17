@@ -60,6 +60,8 @@ Every axis of the exploration space that can be measured, is measured. Determini
 
 **Honest note for implementers:** the regime → topology mapping is hand-authored expertise at the start. It is a lookup table with a language model on the front, not emergent reasoning. That's fine — it's the moat — but it should never be described internally as anything else.
 
+> **Amendment (see Implementation notes → resolved decisions):** the "lookup table" is now structured as per-axis rules composed by intersection plus an evidence-backed override table for known joint interactions. Growth costs one rule, not O(topologies × regimes) cells. The character of the moat is unchanged; the storage shape is.
+
 ---
 
 ## 5. Search space collapse
@@ -238,7 +240,12 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 
 **M1 — Contracts & registry (schemas only, no runtime)**
 - `TaskContract` schema: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria.
-- `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, license, pinned catalog version (§13). **Cost is not a scalar field** — it is a function of config, measured on target hardware and cached with the catalog version, not declared. Tiling cost scales roughly as tile-count × overlap-factor (2×2 with overlap ≈ 4–5× single-pass); scalar cost lets the case base learn that tiling is free.
+- `CapabilityRegistry` schema: component manifest with declared preconditions, I/O types, license, pinned catalog version (§13). **Cost is a function of config, not a scalar field**, and is two-tiered for v0:
+  - **Reference cost:** measured on a canonical reference SKU at registry-register time, expressed as a function of config parameters (tile-count, input resolution, batch size, tracker window). Not declared, not guessed. Cached with catalog version.
+  - **Target cost:** re-measured on the target hardware from the `TaskContract` hardware envelope during a mandatory calibration pass before config-freeze. Tier-0 gate uses **target-measured** cost, never reference-scaled cost.
+  - **Planner during search uses reference cost with a declared hardware scaling function** — otherwise §5's staged local search can't reason about latency slack until deployment.
+  - Ledger entry records both the planner-used estimate and the measured value; sustained divergence is a data signal that the reference SKU has drifted from the fleet.
+  - Scalar cost or unmeasured tiling cost lets the case base learn that tiling is free — the exact failure mode this two-tier model prevents.
 - `LedgerEntry` schema exactly as §9 — `hypothesis`, `verdict`, `scorer_tier`, `confounded`, `provenance` are non-negotiable.
 - `RegimeVector` schema for §4 axes, extended with a per-axis confidence field (see §4.1 proposal below).
 - `EvalSet` schema: reference to a ground-truth file (COCO for detection, MOT for tracking) plus scoring-function identifier and catalog-version pin.
@@ -270,7 +277,8 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 - Open-vocab detector + SAM2 mask/box generation over sampled frames. Produces the proposal stream M5's UI reviews.
 - **Load-bearing component is the sampling strategy, not the models.** Uniform sampling of 200 frames returns the modal easy case; the eval set fails to cover regimes where candidate configs actually differ; tier-3 then produces false confidence with a credible number — **worse than no tier-3**.
 - Sampling stratifies over: (a) the §4 regime axes, and (b) **disagreement between candidate configs**. (b) is chicken-and-egg with M3's planner — expect a two-phase sampler: regime-stratified pass first, disagreement-augmented pass after initial candidates propose.
-- 200-frame budget × ~6 regimes × ~4 disagreement bands ≈ 8 frames/stratum. Tight, especially for rare-class detection recall. Sampler must degrade cleanly under budget pressure (oversample regimes with low profiling confidence per §4.1; skip disagreement pass on unanimous regions).
+- 200-frame budget × ~6 regimes × ~4 disagreement bands ≈ 8 frames/stratum. Tight, especially for rare-class detection recall (a rare class in a rare-regime stratum may have single-digit boxes total). Sampler must degrade cleanly under budget pressure (oversample regimes with low profiling confidence per §4.1; skip disagreement pass on unanimous regions).
+- **Tier-3 API exposes per-stratum confidence intervals, not a single point estimate.** A per-stratum CI is the only defence against the failure mode this milestone exists to prevent — a scalar tier-3 number derived from mixed-stratum counts silently reintroduces the false-confidence trap the sampling strategy is designed to eliminate.
 
 **M5 — Adjudication UI (out of v0; product boundary)**
 - Auto-annotation review over the M4.5 proposal stream — accept / reject / nudge for detection, track-level events only for tracking. **Zero CV surface** — no mAP, no thresholds, no configs. A domain expert produces a ground-truth file without knowing what a ground-truth file is.
@@ -311,7 +319,7 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 
   That is 6–8 rules, O(regimes + topologies), not O(regimes × topologies). Growing either axis costs one rule, not 50 cells.
 
-  Composition misses genuine joint interactions (e.g. congestion says appearance-assisted while motion dynamics says motion-only — same axis, opposite implications). **Layer a short override table on top of the compositional defaults for known joint interactions.** Discovery mechanism for overrides is not the author's intuition — it is §9 `confirmed` verdicts on the bounded joint-refinement pass (§5). Overrides added without ledger evidence are candidates, not decisions.
+  Composition misses genuine joint interactions (e.g. congestion says appearance-assisted while motion dynamics says motion-only — same axis, opposite implications). **Layer a short override table on top of the compositional defaults for known joint interactions.** Discovery mechanism for overrides is stricter than "look at `confirmed` verdicts on the joint-refinement pass" — that pass is marked `confounded` in §9 for exactly this reason, and joint-pass `confirmed` verdicts cannot be causally attributed to any single axis pair. An override is promoted only when **two single-variable deltas along the axes in question each fail (refuted or inconclusive) to explain the observed improvement** — that isolates the interaction. Anything weaker is a candidate for further probing, not a decision. Overrides added without this evidence are correlational noise.
 
   **Pending §4 amendment:** §4's "It is a lookup table with a language model on the front" language now describes the wrong structure. The claim should say "per-axis rules composed by intersection, with an evidence-backed override table for known joint interactions." Deferred to design agents per the "no in-place §1–16 edits" standing instruction — flag in chat.
 
@@ -328,7 +336,7 @@ Living section. Appended to as implementation proceeds. Notes are proposals unti
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Uniform-sampled eval set produces false confidence in tier-3 | Critical | Stratified sampling over regime axes + candidate-config disagreement (M4.5). Uniform sampling returns the modal easy case; tier-3 then rank-orders configs that never disagreed on anything hard. |
+| Uniform-sampled eval set produces false confidence in tier-3 | Critical | Stratified sampling over regime axes + candidate-config disagreement (M4.5). Uniform sampling returns the modal easy case; tier-3 then rank-orders configs that never disagreed on anything hard. Tier-3 API returns per-stratum CIs, never a scalar mixed over strata. |
 | Scalar declared cost lets tier-0 gate mis-price tiling | High | Cost is a function of config, measured on target hardware, versioned with catalog. See M1 registry manifest. |
 | Compositional mapping misses joint interactions between regime axes | Medium | Override table on top of per-axis rules; overrides added only from §9 `confirmed` ledger verdicts, not intuition. |
 
