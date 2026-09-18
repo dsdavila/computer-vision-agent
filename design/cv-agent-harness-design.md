@@ -37,11 +37,11 @@ Take (a) a set of images or video(s) and (b) a natural-language specification of
 
 | Layer | Responsibility | LLM involvement |
 |---|---|---|
-| Spec compiler | NL spec → typed task contract: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria | High. One-shot, human-confirmed. |
-| Data profiler | Cheap deterministic probes → regime vector with per-probe confidence (§4, §4.1) | None |
-| Feasibility gate | Regime vector + contract → proceed / refuse with physical reason (§8); refuses on low-confidence profiling | Low. Rule-driven. |
-| Capability registry | Typed components: preconditions, I/O contracts, two-tier cost function (§13), license, pinned version | None |
-| Planner | Regime + contract → candidate topologies via compositional rules (§4.2); seeds from case base when available | Medium. Constrained generation over registry only. |
+| Spec compiler | Natural-language spec → task contract: ontology, spatial/temporal predicates, operating point, hardware envelope, success criteria | High. One-shot, human-confirmed. |
+| Data profiler | Cheap deterministic probes → scene properties with per-property confidence (§4, §4.1) | None |
+| Feasibility gate | Scene properties + contract → proceed / refuse with physical reason (§8); refuses on low-confidence profiling | Low. Rule-driven. |
+| Capability registry | Components with preconditions, I/O contracts, two-tier cost function (§13), license, pinned version | None |
+| Planner | Scene properties + contract → candidate topologies via compositional rules (§4.2); seeds from case base when available | Medium. Constrained generation over registry only. |
 | Stage specialists | Per-stage optimization: detection, association, ReID/appearance, event logic | Existing VLM tuner drops in as the detection/association specialist |
 | Scorer | Tiered scoring stack (§6) | VLM only at tier 2 |
 | Packager | Cost calibration, config freeze, container build, ledger export, replay bundle | None |
@@ -51,11 +51,11 @@ The task contract is the human-confirmed interface. Everything downstream compil
 
 ---
 
-## 4. Profiler: the regime vector
+## 4. Profiler: scene properties
 
-Every axis of the exploration space that can be measured, is measured. Deterministic code, no model involvement.
+Every measurable property of the scene is measured. Deterministic code, no model involvement. Terminology: **scene properties** are the measurements below; **regime** is a discrete class of scene (§2) that scene properties place us in.
 
-| Axis | Measurement | Proposal-dependent? | Constrains |
+| Property | Measurement | Proposal-dependent? | Constrains |
 |---|---|---|---|
 | Pixels on target | Proposal box height distribution, p10/p50 | Yes | Detector, tile strategy |
 | Congestion | Detections per frame, mean pairwise IoU, occlusion rate | Yes | Tracker, association gating |
@@ -66,18 +66,20 @@ Every axis of the exploration space that can be measured, is measured. Determini
 
 ### 4.1 Probe confidence and the bootstrap problem
 
-Four of six probes are measured **from proposals**, which means they depend on a detector that may itself be failing. If the open-vocab detector lands in the failed half of its bimodal regime (§14), the regime vector is garbage and every downstream decision is confidently wrong on bad input.
+Four of six probes are measured **from proposals**, which means they depend on a detector that may itself be failing. If the open-vocab detector lands in the failed half of the bimodal performance range (§14), the scene properties are garbage and every downstream decision is confidently wrong on bad input.
 
 - Probes are detector-independent wherever possible. Optical flow, intensity variance, and saturation/clipping need no proposals.
 - Where a probe is unavoidably proposal-dependent, it **emits a confidence alongside the value**, not a bare scalar.
 - The feasibility gate **refuses on low profiling confidence** rather than proceeding. For a team with no CV engineer, no verdict beats a confident-wrong verdict.
-- **Probe-discrimination validation** (M2): each probe must demonstrate on a held-out regime set that it separates the regimes it claims to. Failure to discriminate blocks that probe from shipping. A probe returning a plausible number on every scene is worse than a missing probe.
+- **Probe-discrimination validation** (M2): each probe must demonstrate on a held-out set that it distinguishes the scene classes it claims to. Failure to discriminate blocks that probe from shipping. A probe returning a plausible number on every scene is worse than a missing probe.
 
-### 4.2 Regime → topology mapping: compositional rules, not a cell table
+### 4.2 Scene properties → topology mapping: compositional rules, not a cell table
 
-Regime axes constrain **different** catalog dimensions, so the mapping is authored as per-axis rules composed by intersection rather than enumerated over the cross-product:
+Terminology: a **topology** is a specific combination of catalog components — one detector + tile setting + tracker + ReID choice. There are 24 in the v0 catalog (§15). The mapping selects a handful of promising topologies for a given scene.
 
-| Regime axis | Constrains |
+Different scene properties constrain **different** catalog dimensions, so the mapping is authored as per-property rules composed by intersection rather than enumerated over the cross-product:
+
+| Scene property | Constrains |
 |---|---|
 | Pixels on target | {detector, tile} |
 | Target novelty | {detector} |
@@ -85,7 +87,7 @@ Regime axes constrain **different** catalog dimensions, so the mapping is author
 | Motion dynamics | {tracker} |
 | Appearance separability | {reid} |
 
-6–8 rules, O(regimes + topologies). Growing either axis costs one rule, not fifty cells.
+6–8 rules, O(properties + topologies). Growing either axis costs one rule, not fifty cells.
 
 Composition misses genuine joint interactions — congestion may argue for appearance-assisted tracking while motion dynamics argues for motion-only. A short **override table** for known joint cases sits on top of the compositional defaults.
 
@@ -104,12 +106,12 @@ Worked for the v0 catalog (§15). The general argument holds at any catalog size
 | Raw catalog | 3 detectors × 2 tile × 2 trackers × 2 ReID = 24 topologies | ~640 topologies | — |
 | × parameters | ~8 params × 5 values ≈ 3.9×10⁵ per topology → ~9.4×10⁶ | ~2.5×10⁸ | — |
 | Tier-0 constraints | ~14 topologies | ~150 | Latency, VRAM, airgap, license — against the reference cost function with declared hardware scaling (§13) |
-| Regime conditioning | 3–5 topologies | 6–10 | §4.2 compositional rules |
+| Scene conditioning | 3–5 topologies | 6–10 | §4.2 compositional rules |
 | Case-base retrieval | no-op in v0 | 6–10 seeded configs | Post-v0. Registry defaults supply seeds until then |
 | Staged local search | ~25–40 evals per topology | ~25–40 | ±2 steps per param, coordinate descent, not grid |
 | **Total** | **~100–200 evaluations** | **~200–400 evaluations** | Hours on a short clip |
 
-Regime conditioning is the dominant reduction and it is bounded by profiler discriminative power, not catalog size. That is why catalog breadth is gated by the profiler and not the reverse.
+Scene conditioning is the dominant reduction and it is bounded by profiler discriminative power, not catalog size. That is why catalog breadth is gated by the profiler and not the reverse.
 
 **Stage ordering:** detection quality → association → appearance/ReID → event logic. Detection dominates every downstream metric; tuning association against a bad detector wastes budget.
 
@@ -150,11 +152,11 @@ The first thing auto-annotation buys is a **held-out evaluation set**, not train
 
 ### 7.1 Two sets, not one
 
-Sampling on **config disagreement** and sampling for an **unbiased per-regime estimate** are different jobs, and merging them breaks the budget (§7.2). Split them:
+Sampling on **config disagreement** and sampling for an **unbiased per-scene-class estimate** are different jobs, and merging them breaks the budget (§7.2). Split them:
 
 | Set | Sampled on | Used for | Never used for |
 |---|---|---|---|
-| Eval set | Regime strata only (~6) | Tier-3 scores, cross-config selection, regression gating, drift baseline | — |
+| Eval set | Scene strata only (~6) | Tier-3 scores, cross-config selection, regression gating, drift baseline | — |
 | Diagnostic set | Candidate-config disagreement | Tier-2 pruning, human spot-checks, failure-mode diagnosis | Any scored number |
 
 The diagnostic set is where configs actually differ, which makes it maximally informative and maximally biased. Keeping it out of the headline number is what lets it be sampled aggressively.
@@ -165,7 +167,7 @@ Uniform sampling returns the modal easy case; the eval set then fails to cover r
 
 | Quantity | Merged-set design | Split-set design (§7.1) |
 |---|---|---|
-| Strata | 6 regimes × 4 disagreement bands = 24 | 6 regimes |
+| Strata | 6 scene classes × 4 disagreement bands = 24 | 6 scene classes |
 | Boxes per stratum at ~1,500 total | ~62 | ~250 |
 | CI half-width at p≈0.9 | ±7.5 pts | ±3.7 pts |
 | Boxes needed to resolve a 3-pt difference | ~385/stratum → ~9,200 total | ~385/stratum → ~2,300 total |
@@ -175,7 +177,7 @@ So: per-stratum CIs at a merged 24-stratum design are an **exclusion** instrumen
 
 | Artifact | Volume | Human action | Est. time |
 |---|---|---|---|
-| Detection eval set | ~6 regime strata, ~2,300 boxes | Accept / reject / nudge proposals | 2.5–4 h |
+| Detection eval set | ~6 scene strata, ~2,300 boxes | Accept / reject / nudge proposals | 2.5–4 h |
 | Tracking eval set | 3 clips × ~300 frames | Review track-level events only (births, deaths, switches) | ~1 h |
 | Diagnostic set | ~300 boxes on disagreement | Same action, separate store | ~30 min |
 | Spec confirmation | 1 pass | Confirm compiled task contract | 10 min |
@@ -184,7 +186,7 @@ Roughly half a day still, but say four to six hours rather than "four hours of c
 
 **Tier-3 API returns per-stratum confidence intervals, never a scalar pooled over strata.** A pooled scalar reintroduces the false-confidence trap that stratification exists to eliminate. Where a pooled number is genuinely wanted (a headline figure for a report), it carries the per-stratum spread alongside it.
 
-**Sampler degradation under budget pressure:** oversample regimes with low profiling confidence (§4.1); never silently drop a stratum — an empty stratum is reported as no-estimate, not as a missing row.
+**Sampler degradation under budget pressure:** oversample scenes with low profiling confidence (§4.1); never silently drop a stratum — an empty stratum is reported as no-estimate, not as a missing row.
 
 **UI requirement (M5):** the adjudication interface exposes zero CV surface — no mAP, no thresholds, no configs. "Is this the thing, yes or no." A domain expert can do this; that is why it does not require the headcount the team cannot get.
 
@@ -217,7 +219,7 @@ Append-only. The winning config is a pointer into the ledger, not the artifact i
 | `hypothesis` | Predicted effect, stated numerically **before** the run |
 | `outcome` | Measured effect |
 | `verdict` | confirmed / refuted / inconclusive — computed, not narrated |
-| `regime_vector` | Profiler output at the time, with per-probe confidence (§4.1) |
+| `scene_properties` | Profiler output at the time, with per-property confidence (§4.1) |
 | `scorer_tier` | Which tier produced the score |
 | `confounded` | True for joint-refinement entries and any multi-variable change |
 | `cost_estimated` | Planner's reference-cost estimate at decision time (§13) |
@@ -236,7 +238,7 @@ Append-only. The winning config is a pointer into the ledger, not the artifact i
 
 Files-in-git is the system of record: one append-only file per entry, catalog version pinned in the entry (§13). Free provenance for regulated review (§11), works airgapped.
 
-A **derived index** (SQLite or parquet) over regime vectors supports case-base nearest-neighbour retrieval. Explicitly a cache, never authoritative, rebuildable from git by one command. Git is not an index; retrieval degrades badly past ~10 cases at 100–200 entries each.
+A **derived index** (SQLite or parquet) over scene properties supports case-base nearest-neighbour retrieval. Explicitly a cache, never authoritative, rebuildable from git by one command. Git is not an index; retrieval degrades badly past ~10 cases at 100–200 entries each.
 
 Rebuild cost is real and small: ~400 entries/problem at ~2 KB is roughly 40K files and under 100 MB at 100 problems, so a full rebuild is seconds to low minutes. Steady state uses **incremental ingest keyed on last-seen commit SHA**, O(new entries). Full rebuild remains the migration path for §13.
 
@@ -246,7 +248,7 @@ PR diff-review of ledger files is **not** an audit surface — nobody reviews 40
 
 ## 10. Case base
 
-Every solved problem writes `(regime_vector, winning_config, achieved_score, spec_class)` to the store. New problems retrieve nearest neighbours and seed from them.
+Every solved problem writes `(scene_properties, winning_config, achieved_score, spec_class)` to the store. New problems retrieve nearest neighbours and seed from them.
 
 Retrieval requires almost no model capability, so **the system improves over time without the on-prem model improving**. This decoupling is the strongest argument for the frozen-catalog architecture. Schema and storage are built in v0 (§9.1); retrieval logic is post-v0.
 
@@ -304,7 +306,7 @@ The planner needs an estimate before target hardware is in the loop, which is wh
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Proxy metrics treated as cross-config comparable | Critical | Tiered scorer (§6); tier-1 not orderable across topologies at the API level; planner restricted to one topology absent tier 3 |
-| Eval-set sampling produces false confidence | Critical | §7.1 split sets; regime strata only for scored numbers; per-stratum CIs, never a pooled scalar |
+| Eval-set sampling produces false confidence | Critical | §7.1 split sets; scene strata only for scored numbers; per-stratum CIs, never a pooled scalar |
 | Profiler bootstrap: probes measured from failing proposals | High | §4.1 — per-probe confidence, feasibility refuses on low confidence, probe-discrimination validation in M2 |
 | "Arbitrary CV problem" scope creep | High | Two verticals. Surveillance/security/inspection first — roughly rigid targets, mostly static cameras |
 | Open-vocab performance is bimodal, not continuous | High | Early regime check that escalates to few-shot/fine-tune instead of grinding thresholds in the useless regime |
@@ -319,9 +321,9 @@ The planner needs an estimate before target hardware is in the loop, which is wh
 
 ## 15. v0 catalog
 
-Four axes, 24 topologies. Chosen to span the regime axes rather than to be individually best.
+Four axes, 24 topologies. Chosen to span the scene properties rather than to be individually best.
 
-| Axis | v0 values | Regime axis covered |
+| Catalog axis | v0 values | Scene property covered |
 |---|---|---|
 | Detector | general closed-set, open-vocab, small-object architecture | Target novelty; pixels on target |
 | Tile strategy | off, on | Pixels on target |
@@ -344,8 +346,8 @@ Freeze before writing runtime code:
 | 2 | `LedgerEntry` | Schema drift silently corrupts the case base (§13) |
 | 3 | Registry component manifest, including the two-tier cost function signature (§13.1) | Scalar cost is the schema change that most quietly ruins tier-0 and the case base |
 | 4 | `EvalSet` — GT file reference + scorer id + catalog pin + stratum labels | Cross-topology selection depends on it; retrofitting means re-running search |
-| 5 | `MappingRules` — per-axis rules + override table (§4.2) | Adding a topology or regime is a one-rule change against this schema, not a grid rewrite |
-| 6 | `RegimeVector` — §4 axes with per-axis confidence (§4.1) | Confidence added later means every historical entry is unlabelled |
+| 5 | `MappingRules` — per-property rules + override table (§4.2) | Adding a topology or scene class is a one-rule change against this schema, not a grid rewrite |
+| 6 | `SceneProperties` — §4 properties with per-property confidence (§4.1) | Confidence added later means every historical entry is unlabelled |
 
 ---
 
@@ -354,10 +356,10 @@ Freeze before writing runtime code:
 | M | Contents | Notes |
 |---|---|---|
 | M1 | Contracts & registry, schemas only, no runtime | The six interfaces in §16, as JSON Schemas + Pydantic bindings |
-| M2 | Profiler + feasibility gate, deterministic | Each §4 axis as an independent probe with confidence where proposal-dependent. Catalog-derived, version-pinned thresholds (§8). Probe-discrimination validation gates each probe |
+| M2 | Profiler + feasibility gate, deterministic | Each §4 scene property as an independent probe with confidence where proposal-dependent. Catalog-derived, version-pinned thresholds (§8). Probe-discrimination validation gates each probe |
 | M3 | Planner + ledger + tiers 0/1/3-minimal | Planner via §4.2 compositional rules; LLM only for constrained generation over registry entries. Ledger with dual rendering and derived index (§9.1). Tier 3 ingests COCO/MOT + scoring function — **this is what makes a multi-topology planner legitimate**. VLM tuner drops in here |
 | M4 | Packager + glue | Cost calibration pass (§13.1), config freeze, container build, replay bundle, ledger export. Predicate language for event logic (§12) — minimal grammar, not deferred. **v0 exits here** |
-| M4.5 | Proposal pipeline | Open-vocab + SAM2 proposals. **Load-bearing component is the sampling strategy, not the models** (§7). Two-phase: regime-stratified pass first, disagreement pass after initial candidates propose |
+| M4.5 | Proposal pipeline | Open-vocab + SAM2 proposals. **Load-bearing component is the sampling strategy, not the models** (§7). Two-phase: scene-stratified pass first, disagreement pass after initial candidates propose |
 | M5 | Adjudication UI | Review over M4.5 proposals, zero CV surface (§7). Emits the same COCO/MOT format M3 already ingests. **This milestone is the boundary between a developer tool and the product §1 describes** |
 | post-v0 | Tier-2 Bradley-Terry, case-base retrieval, drift monitor | Designed for now, built later |
 
@@ -385,10 +387,10 @@ Freeze before writing runtime code:
 - **Endpoint:** provider-agnostic; local gates, hosted diagnoses (§18).
 - **Ledger store:** files-in-git authoritative, derived index as rebuildable cache, incremental ingest on commit SHA (§9.1).
 - **v0 catalog:** four axes, 24 topologies (§15).
-- **Regime mapping:** compositional per-axis rules plus override table with the two-delta promotion criterion (§4.2).
+- **Scene properties → topology mapping:** compositional per-property rules plus override table with the two-delta promotion criterion (§4.2).
 - **Tier 3 in v0:** minimal form, GT file + scoring function; UI deferred to M5.
 - **Cost:** two-tier, reference for search and target-measured for the tier-0 gate (§13.1).
-- **Eval sampling:** split eval set (regime strata, scored) from diagnostic set (disagreement, never scored) (§7.1).
+- **Eval sampling:** split eval set (scene strata, scored) from diagnostic set (disagreement, never scored) (§7.1).
 
 ### Superseded
 
@@ -400,10 +402,10 @@ Freeze before writing runtime code:
 | M5 contains "nothing else" | Split M4.5 / M5 | The UI sits on a non-trivial proposal + sampling pipeline |
 | Component cost as a scalar manifest field | Two-tier measured cost function (§13.1) | A flat field teaches the case base that tiling is free |
 | Cost measured on target hardware, full stop | Reference cost for search, target cost for the gate | Unimplementable as stated — the planner needs an estimate before target hardware is in the loop |
-| Regime → topology as a dense cell table | Compositional per-axis rules | 24 topologies × 6–10 regimes crosses 200 cells; composition is O(regimes + topologies) |
+| Scene → topology as a dense cell table | Compositional per-property rules | 24 topologies × 6–10 scene classes crosses 200 cells; composition is O(properties + topologies) |
 | Overrides promoted from `confirmed` ledger verdicts | Two failed single-variable deltas required | Joint-pass entries are `confounded` by §9 and cannot be attributed to an axis pair |
 | Catalog v0 is three-axis (12 topologies) | Four-axis, 24 | Scale/tile axis was dropped from the enumeration by mistake |
-| One eval set, sampled on regime × disagreement | Two sets (§7.1) | 24 strata at ~62 boxes gives ±7.5-pt CIs — exclusion only, useless for ranking |
+| One eval set, sampled on scene × disagreement | Two sets (§7.1) | 24 strata at ~62 boxes gives ±7.5-pt CIs — exclusion only, useless for ranking |
 | Eval budget ~200 frames / 1.5–2.5 h | ~2,300 boxes / 2.5–4 h detection, plus tracking and diagnostic | Original figure was derived for unstratified review |
 | Feasibility thresholds hardcoded | Catalog-derived, version-pinned | Hardcoded values go silently wrong on catalog change |
 | §§1–16 append-only, changes go to Implementation notes | Body is editable; reversals recorded here | The rule produced the §5/§15 catalog contradiction |
@@ -412,7 +414,7 @@ Freeze before writing runtime code:
 
 - Second vertical, after surveillance/security/inspection.
 - Whether the deliberate §15 overlap survives ~10 solved cases.
-- Whether 6 regime strata is the right granularity, or whether some axes need splitting once §4.1 confidence data exists — each split multiplies the §7.2 budget.
+- Whether 6 scene strata is the right granularity, or whether some scene properties need splitting once §4.1 confidence data exists — each split multiplies the §7.2 budget.
 - Tracking eval budget has not had the §7.2 treatment. Track-level event review is a different unit than boxes and the 3-clip figure is inherited, not derived.
 
 ---

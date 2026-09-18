@@ -1,4 +1,4 @@
-"""RegimeVector — §4 profiler output, §4.1 per-axis confidence.
+"""SceneProperties — §4 profiler output, §4.1 per-property confidence.
 
 Frozen. Everything downstream (feasibility gate, planner, ledger, mapping rules)
 compiles against this shape.
@@ -20,7 +20,7 @@ class ProbeConfidence(str, Enum):
 _reading = ConfigDict(frozen=True, extra="forbid")
 
 
-class PixelsOnTargetReading(BaseModel):
+class PixelsOnTarget(BaseModel):
     """§4 — proposal box height distribution. Proposal-dependent (§4.1)."""
 
     model_config = _reading
@@ -30,7 +30,7 @@ class PixelsOnTargetReading(BaseModel):
     confidence: ProbeConfidence
 
 
-class CongestionReading(BaseModel):
+class Congestion(BaseModel):
     """§4 — detection density and occlusion. Proposal-dependent (§4.1)."""
 
     model_config = _reading
@@ -41,7 +41,7 @@ class CongestionReading(BaseModel):
     confidence: ProbeConfidence
 
 
-class MotionDynamicsReading(BaseModel):
+class MotionDynamics(BaseModel):
     """§4 — flow magnitude, displacement variance, camera motion. Detector-independent."""
 
     model_config = _reading
@@ -52,7 +52,7 @@ class MotionDynamicsReading(BaseModel):
     confidence: ProbeConfidence
 
 
-class LightingReading(BaseModel):
+class Lighting(BaseModel):
     """§4 — intensity variance and clipping. Detector-independent."""
 
     model_config = _reading
@@ -62,7 +62,7 @@ class LightingReading(BaseModel):
     confidence: ProbeConfidence
 
 
-class AppearanceSeparabilityReading(BaseModel):
+class AppearanceSeparability(BaseModel):
     """§4 — inter-instance embedding distance. Proposal-dependent (§4.1)."""
 
     model_config = _reading
@@ -71,7 +71,7 @@ class AppearanceSeparabilityReading(BaseModel):
     confidence: ProbeConfidence
 
 
-class TargetNoveltyReading(BaseModel):
+class TargetNovelty(BaseModel):
     """§4 — open-vocab score distribution against the spec ontology. Proposal-dependent (§4.1)."""
 
     model_config = _reading
@@ -81,21 +81,21 @@ class TargetNoveltyReading(BaseModel):
     confidence: ProbeConfidence
 
 
-class RegimeVector(BaseModel):
-    """§4 profiler output — all six axes required.
+class SceneProperties(BaseModel):
+    """§4 profiler output — all six properties required.
 
-    Every reading carries its own confidence (§4.1). The catalog version pin lets
+    Every property carries its own confidence (§4.1). The catalog version pin lets
     §8 feasibility thresholds and §9 ledger entries reason about drift and
     migrations.
     """
 
     model_config = _reading
 
-    pixels_on_target: PixelsOnTargetReading
-    congestion: CongestionReading
-    motion_dynamics: MotionDynamicsReading
-    lighting: LightingReading
-    appearance_separability: AppearanceSeparabilityReading
-    target_novelty: TargetNoveltyReading
+    pixels_on_target: PixelsOnTarget
+    congestion: Congestion
+    motion_dynamics: MotionDynamics
+    lighting: Lighting
+    appearance_separability: AppearanceSeparability
+    target_novelty: TargetNovelty
 
     catalog_version: str = Field(min_length=1)

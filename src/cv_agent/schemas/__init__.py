@@ -1,21 +1,21 @@
-from cv_agent.schemas.regime_vector import (
-    AppearanceSeparabilityReading,
-    CongestionReading,
-    LightingReading,
-    MotionDynamicsReading,
-    PixelsOnTargetReading,
+from cv_agent.schemas.scene_properties import (
+    AppearanceSeparability,
+    Congestion,
+    Lighting,
+    MotionDynamics,
+    PixelsOnTarget,
     ProbeConfidence,
-    RegimeVector,
-    TargetNoveltyReading,
+    SceneProperties,
+    TargetNovelty,
 )
 
 __all__ = [
-    "AppearanceSeparabilityReading",
-    "CongestionReading",
-    "LightingReading",
-    "MotionDynamicsReading",
-    "PixelsOnTargetReading",
+    "AppearanceSeparability",
+    "Congestion",
+    "Lighting",
+    "MotionDynamics",
+    "PixelsOnTarget",
     "ProbeConfidence",
-    "RegimeVector",
-    "TargetNoveltyReading",
+    "SceneProperties",
+    "TargetNovelty",
 ]
