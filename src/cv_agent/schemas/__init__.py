@@ -22,6 +22,14 @@ from cv_agent.schemas.eval_set import (
     GroundTruthFormat,
     StratumLabel,
 )
+from cv_agent.schemas.ledger_entry import (
+    LedgerEntry,
+    MetricReading,
+    Prediction,
+    Provenance,
+    ScorerTier,
+    Verdict,
+)
 from cv_agent.schemas.mapping_rules import (
     BandRef,
     CatalogConstraint,
@@ -78,10 +86,12 @@ __all__ = [
     "IOContract",
     "IOKind",
     "IntParam",
+    "LedgerEntry",
     "Lighting",
     "LineCrossingDirection",
     "LineCrossingPredicate",
     "MappingRules",
+    "MetricReading",
     "MotionDynamics",
     "NormalizedPoint",
     "Ontology",
@@ -92,11 +102,14 @@ __all__ = [
     "PixelsOnTarget",
     "Preconditions",
     "Predicate",
+    "Prediction",
     "ProbeConfidence",
     "PropertyRule",
+    "Provenance",
     "ROIPredicate",
     "ReferenceCost",
     "SceneProperties",
+    "ScorerTier",
     "ScoringMetric",
     "StratumLabel",
     "SuccessCriterion",
@@ -104,4 +117,5 @@ __all__ = [
     "TargetNovelty",
     "TaskContract",
     "ThresholdBand",
+    "Verdict",
 ]
