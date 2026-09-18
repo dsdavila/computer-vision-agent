@@ -22,6 +22,14 @@ from cv_agent.schemas.eval_set import (
     GroundTruthFormat,
     StratumLabel,
 )
+from cv_agent.schemas.mapping_rules import (
+    BandRef,
+    CatalogConstraint,
+    MappingRules,
+    Override,
+    PropertyRule,
+    ThresholdBand,
+)
 from cv_agent.schemas.scene_properties import (
     AppearanceSeparability,
     Congestion,
@@ -50,7 +58,9 @@ from cv_agent.schemas.task_contract import (
 
 __all__ = [
     "AppearanceSeparability",
+    "BandRef",
     "BoolParam",
+    "CatalogConstraint",
     "CategoricalParam",
     "ComponentKind",
     "ComponentManifest",
@@ -71,16 +81,19 @@ __all__ = [
     "Lighting",
     "LineCrossingDirection",
     "LineCrossingPredicate",
+    "MappingRules",
     "MotionDynamics",
     "NormalizedPoint",
     "Ontology",
     "OperatingBias",
     "OperatingPoint",
+    "Override",
     "ParamSpec",
     "PixelsOnTarget",
     "Preconditions",
     "Predicate",
     "ProbeConfidence",
+    "PropertyRule",
     "ROIPredicate",
     "ReferenceCost",
     "SceneProperties",
@@ -90,4 +103,5 @@ __all__ = [
     "TargetCostMeasurement",
     "TargetNovelty",
     "TaskContract",
+    "ThresholdBand",
 ]
