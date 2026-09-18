@@ -15,6 +15,13 @@ from cv_agent.schemas.component_manifest import (
     ReferenceCost,
     TargetCostMeasurement,
 )
+from cv_agent.schemas.eval_set import (
+    DiagnosticSet,
+    EvalSet,
+    GroundTruthFile,
+    GroundTruthFormat,
+    StratumLabel,
+)
 from cv_agent.schemas.scene_properties import (
     AppearanceSeparability,
     Congestion,
@@ -51,8 +58,12 @@ __all__ = [
     "Congestion",
     "CostMeasurement",
     "DeploymentHardware",
+    "DiagnosticSet",
     "DwellTimePredicate",
+    "EvalSet",
     "FloatParam",
+    "GroundTruthFile",
+    "GroundTruthFormat",
     "HardwareEnvelope",
     "IOContract",
     "IOKind",
@@ -74,6 +85,7 @@ __all__ = [
     "ReferenceCost",
     "SceneProperties",
     "ScoringMetric",
+    "StratumLabel",
     "SuccessCriterion",
     "TargetCostMeasurement",
     "TargetNovelty",
